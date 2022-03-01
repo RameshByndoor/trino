@@ -15,7 +15,7 @@ package io.trino.plugin.deltalake.util;
 
 import org.testcontainers.containers.FixedHostPortGenericContainer;
 
-// copied from io.trino.tests.product.launcher.env.DockerContainer
+// copied from an earlier version of io.trino.tests.product.launcher.env.DockerContainer
 class DockerContainer
         extends FixedHostPortGenericContainer<DockerContainer>
 {

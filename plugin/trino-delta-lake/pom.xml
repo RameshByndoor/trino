@@ -20,6 +20,11 @@
     <dependencies>
         <dependency>
             <groupId>io.trino</groupId>
+            <artifactId>trino-collect</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>io.trino</groupId>
             <artifactId>trino-hive</artifactId>
         </dependency>
 
@@ -192,44 +197,6 @@
         </dependency>
 
         <!-- for testing -->
-<!--        <dependency>-->
-<!--            <groupId>io.trino</groupId>-->
-<!--            <artifactId>trino-hive-hadoop2</artifactId>-->
-<!--            <type>test-jar</type>-->
-<!--            <scope>test</scope>-->
-<!--        </dependency>-->
-
-<!--        <dependency>-->
-<!--            <groupId>io.trino</groupId>-->
-<!--            <artifactId>trino-server-main</artifactId>-->
-<!--            <scope>test</scope>-->
-<!--            <exclusions>-->
-<!--                <exclusion>-->
-<!--                    &lt;!&ndash; TODO provided by the incorrectly shaded com.linkedin.calcite:calcite-core:{version}:jar:shaded &ndash;&gt;-->
-<!--                    <groupId>org.apache.commons</groupId>-->
-<!--                    <artifactId>commons-lang3</artifactId>-->
-<!--                </exclusion>-->
-<!--                <exclusion>-->
-<!--                    &lt;!&ndash; provided by org.alluxio:alluxio-shaded-client:2.4.0 &ndash;&gt;-->
-<!--                    <groupId>com.google.protobuf</groupId>-->
-<!--                    <artifactId>protobuf-java</artifactId>-->
-<!--                </exclusion>-->
-<!--            </exclusions>-->
-<!--        </dependency>-->
-
-<!--        <dependency>-->
-<!--            <groupId>io.trino</groupId>-->
-<!--            <artifactId>trino-server-main</artifactId>-->
-<!--            <type>test-jar</type>-->
-<!--            <scope>test</scope>-->
-<!--            <exclusions>-->
-<!--                <exclusion>-->
-<!--                    &lt;!&ndash; provided by org.alluxio:alluxio-shaded-client:2.4.0 &ndash;&gt;-->
-<!--                    <groupId>com.google.protobuf</groupId>-->
-<!--                    <artifactId>protobuf-java</artifactId>-->
-<!--                </exclusion>-->
-<!--            </exclusions>-->
-<!--        </dependency>-->
 
         <dependency>
             <groupId>io.trino</groupId>
@@ -325,6 +292,13 @@
         </dependency>
 
         <dependency>
+            <groupId>com.github.docker-java</groupId>
+            <artifactId>docker-java-api</artifactId>
+            <version>${dep.docker-java.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
             <groupId>io.minio</groupId>
             <artifactId>minio</artifactId>
             <version>6.0.13</version>
@@ -362,6 +336,13 @@
         <dependency>
             <groupId>org.openjdk.jmh</groupId>
             <artifactId>jmh-generator-annprocess</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.rnorth.duct-tape</groupId>
+            <artifactId>duct-tape</artifactId>
+            <version>1.0.8</version>
             <scope>test</scope>
         </dependency>
 

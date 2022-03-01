@@ -31,6 +31,7 @@ import java.util.Set;
 import static io.trino.plugin.deltalake.DeltaLakeDockerizedMinioDataLake.createDockerizedMinioDataLakeForDeltaLake;
 import static io.trino.plugin.deltalake.DeltaLakeQueryRunner.DELTA_CATALOG;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.testing.TestingConnectorBehavior.SUPPORTS_CREATE_SCHEMA;
 import static io.trino.testing.assertions.Assert.assertEquals;
 import static io.trino.testing.sql.TestTable.randomTableSuffix;
 import static java.lang.String.format;
@@ -226,7 +227,7 @@ public abstract class BaseDeltaLakeMinioConnectorTest
     public void testDropNonEmptySchema()
     {
         String schemaName = "test_drop_non_empty_schema_" + randomTableSuffix();
-        if (!supportsCreateSchema()) {
+        if (!hasBehavior(SUPPORTS_CREATE_SCHEMA)) {
             return;
         }
 
@@ -253,7 +254,7 @@ public abstract class BaseDeltaLakeMinioConnectorTest
         // TODO: better fix would be to configure hadoop container we use in test to use `s3://` filesystem by default
 
         String schemaName = "test_schema_create_" + randomTableSuffix();
-        if (!supportsCreateSchema()) {
+        if (!hasBehavior(SUPPORTS_CREATE_SCHEMA)) {
             assertQueryFails("CREATE SCHEMA " + schemaName, "This connector does not support creating schemas");
             return;
         }
