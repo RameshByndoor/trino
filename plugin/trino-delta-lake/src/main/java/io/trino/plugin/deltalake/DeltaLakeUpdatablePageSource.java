@@ -208,7 +208,6 @@ public class DeltaLakeUpdatablePageSource
 
         // Create page source with predicate pushdown and index column
         ReaderPageSource parquetPageSource = createParquetPageSource(
-                session,
                 parquetPredicate,
                 delegatedColumns.stream()
                         .filter(column -> column.getColumnType() == REGULAR || column == rowIndexColumn)
@@ -487,7 +486,6 @@ public class DeltaLakeUpdatablePageSource
             throws IOException
     {
         ReaderPageSource readerPageSource = createParquetPageSource(
-                session,
                 TupleDomain.all(),
                 allDataColumns.stream().map(DeltaLakeColumnHandle::toHiveColumnHandle).collect(toImmutableList()));
         ConnectorPageSource connectorPageSource = readerPageSource.get();
@@ -549,7 +547,7 @@ public class DeltaLakeUpdatablePageSource
     /**
      * Create a page source with predicate pushdown.
      */
-    private ReaderPageSource createParquetPageSource(ConnectorSession session, TupleDomain<HiveColumnHandle> parquetPredicate, List<HiveColumnHandle> columns)
+    private ReaderPageSource createParquetPageSource(TupleDomain<HiveColumnHandle> parquetPredicate, List<HiveColumnHandle> columns)
     {
         return ParquetPageSourceFactory.createPageSource(
                 new Path(path),
