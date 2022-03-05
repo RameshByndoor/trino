@@ -5,12 +5,12 @@
     <parent>
         <groupId>io.airlift</groupId>
         <artifactId>airbase</artifactId>
-        <version>121</version>
+        <version>122</version>
     </parent>
 
     <groupId>io.trino</groupId>
     <artifactId>trino-root</artifactId>
-    <version>372-SNAPSHOT</version>
+    <version>373-SNAPSHOT</version>
 
     <name>trino-root</name>
     <description>Trino</description>

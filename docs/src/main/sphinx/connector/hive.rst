@@ -676,14 +676,12 @@ features:
 
   * :ref:`sql-data-management`, see also :ref:`hive-data-management`
   * :ref:`sql-schema-table-management`
-  * :ref:`sql-views-management`
+  * :ref:`sql-view-management`
 
 * :ref:`sql-security-operations`, see also :ref:`hive-sql-standard-based-authorization`
 * :ref:`sql-transactions`
 
 Refer to :doc:`the migration guide </appendix/from-hive>` for practical advice on migrating from Hive to Trino.
-
-.. include:: alter-mv-set-properties-unsupported.fragment
 
 .. _hive-alter-table-execute:
 

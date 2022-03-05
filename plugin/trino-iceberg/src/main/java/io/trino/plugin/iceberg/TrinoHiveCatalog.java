@@ -28,9 +28,9 @@ import io.trino.plugin.hive.ViewAlreadyExistsException;
 import io.trino.plugin.hive.ViewReaderUtil;
 import io.trino.plugin.hive.metastore.Column;
 import io.trino.plugin.hive.metastore.Database;
-import io.trino.plugin.hive.metastore.HiveMetastore;
 import io.trino.plugin.hive.metastore.HivePrincipal;
 import io.trino.plugin.hive.metastore.PrincipalPrivileges;
+import io.trino.plugin.hive.metastore.cache.CachingHiveMetastore;
 import io.trino.plugin.hive.util.HiveUtil;
 import io.trino.plugin.iceberg.catalog.IcebergTableOperationsProvider;
 import io.trino.spi.TrinoException;
@@ -47,6 +47,8 @@ import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.connector.ViewNotFoundException;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.type.TypeManager;
+import net.jodah.failsafe.Failsafe;
+import net.jodah.failsafe.RetryPolicy;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.iceberg.BaseTable;
@@ -58,6 +60,8 @@ import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.Transaction;
 
 import java.io.IOException;
+import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -68,6 +72,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Throwables.throwIfUnchecked;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_INVALID_METADATA;
 import static io.trino.plugin.hive.HiveMetadata.STORAGE_TABLE;
@@ -82,6 +87,7 @@ import static io.trino.plugin.hive.metastore.PrincipalPrivileges.NO_PRIVILEGES;
 import static io.trino.plugin.hive.metastore.StorageFormat.VIEW_STORAGE_FORMAT;
 import static io.trino.plugin.hive.util.HiveUtil.isHiveSystemSchema;
 import static io.trino.plugin.hive.util.HiveWriteUtils.getTableDefaultLocation;
+import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_FILESYSTEM_ERROR;
 import static io.trino.plugin.iceberg.IcebergMaterializedViewDefinition.decodeMaterializedViewData;
 import static io.trino.plugin.iceberg.IcebergMaterializedViewDefinition.encodeMaterializedViewData;
 import static io.trino.plugin.iceberg.IcebergMaterializedViewDefinition.fromConnectorMaterializedViewDefinition;
@@ -96,11 +102,13 @@ import static io.trino.spi.StandardErrorCode.INVALID_SCHEMA_PROPERTY;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.SCHEMA_NOT_EMPTY;
 import static io.trino.spi.StandardErrorCode.TABLE_NOT_FOUND;
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.UUID.randomUUID;
 import static org.apache.hadoop.hive.metastore.TableType.VIRTUAL_VIEW;
 import static org.apache.iceberg.BaseMetastoreTableOperations.ICEBERG_TABLE_TYPE_VALUE;
 import static org.apache.iceberg.BaseMetastoreTableOperations.TABLE_TYPE_PROP;
+import static org.apache.iceberg.CatalogUtil.dropTableData;
 import static org.apache.iceberg.TableMetadata.newTableMetadata;
 import static org.apache.iceberg.TableProperties.DEFAULT_FILE_FORMAT_DEFAULT;
 import static org.apache.iceberg.TableProperties.OBJECT_STORE_PATH;
@@ -125,7 +133,7 @@ class TrinoHiveCatalog
     private static final String PRESTO_VIEW_EXPANDED_TEXT_MARKER = HiveMetadata.PRESTO_VIEW_EXPANDED_TEXT_MARKER;
 
     private final CatalogName catalogName;
-    private final HiveMetastore metastore;
+    private final CachingHiveMetastore metastore;
     private final HdfsEnvironment hdfsEnvironment;
     private final TypeManager typeManager;
     private final IcebergTableOperationsProvider tableOperationsProvider;
@@ -139,7 +147,7 @@ class TrinoHiveCatalog
 
     public TrinoHiveCatalog(
             CatalogName catalogName,
-            HiveMetastore metastore,
+            CachingHiveMetastore metastore,
             HdfsEnvironment hdfsEnvironment,
             TypeManager typeManager,
             IcebergTableOperationsProvider tableOperationsProvider,
@@ -282,13 +290,13 @@ class TrinoHiveCatalog
         listNamespaces(session, namespace)
                 .stream()
                 .flatMap(schema -> Stream.concat(
-                        // Get tables with parameter table_type set to  "ICEBERG" or "iceberg". This is required because
-                        // Trino uses lowercase value whereas Spark and Flink use uppercase.
-                        // TODO: use one metastore call to pass both the filters: https://github.com/trinodb/trino/issues/7710
-                        metastore.getTablesWithParameter(schema, TABLE_TYPE_PROP, ICEBERG_TABLE_TYPE_VALUE.toLowerCase(Locale.ENGLISH)).stream()
-                                .map(table -> new SchemaTableName(schema, table)),
-                        metastore.getTablesWithParameter(schema, TABLE_TYPE_PROP, ICEBERG_TABLE_TYPE_VALUE.toUpperCase(Locale.ENGLISH)).stream()
-                                .map(table -> new SchemaTableName(schema, table)))
+                                // Get tables with parameter table_type set to  "ICEBERG" or "iceberg". This is required because
+                                // Trino uses lowercase value whereas Spark and Flink use uppercase.
+                                // TODO: use one metastore call to pass both the filters: https://github.com/trinodb/trino/issues/7710
+                                metastore.getTablesWithParameter(schema, TABLE_TYPE_PROP, ICEBERG_TABLE_TYPE_VALUE.toLowerCase(Locale.ENGLISH)).stream()
+                                        .map(table -> new SchemaTableName(schema, table)),
+                                metastore.getTablesWithParameter(schema, TABLE_TYPE_PROP, ICEBERG_TABLE_TYPE_VALUE.toUpperCase(Locale.ENGLISH)).stream()
+                                        .map(table -> new SchemaTableName(schema, table)))
                         .distinct())  // distinct() to avoid duplicates for case-insensitive HMS backends
                 .forEach(tablesListBuilder::add);
 
@@ -302,14 +310,40 @@ class TrinoHiveCatalog
     public void dropTable(ConnectorSession session, SchemaTableName schemaTableName)
     {
         // TODO: support path override in Iceberg table creation: https://github.com/trinodb/trino/issues/8861
-        Table table = loadTable(session, schemaTableName);
+        BaseTable table = (BaseTable) loadTable(session, schemaTableName);
+        TableMetadata metadata = table.operations().current();
         if (table.properties().containsKey(OBJECT_STORE_PATH) ||
                 table.properties().containsKey(WRITE_NEW_DATA_LOCATION) ||
                 table.properties().containsKey(WRITE_METADATA_LOCATION) ||
                 table.properties().containsKey(WRITE_DATA_LOCATION)) {
             throw new TrinoException(NOT_SUPPORTED, "Table " + schemaTableName + " contains Iceberg path override properties and cannot be dropped from Trino");
         }
-        metastore.dropTable(schemaTableName.getSchemaName(), schemaTableName.getTableName(), true);
+
+        io.trino.plugin.hive.metastore.Table metastoreTable = metastore.getTable(schemaTableName.getSchemaName(), schemaTableName.getTableName())
+                .orElseThrow(() -> new TableNotFoundException(schemaTableName));
+        metastore.dropTable(
+                schemaTableName.getSchemaName(),
+                schemaTableName.getTableName(),
+                false /* do not delete data */);
+        // Use the Iceberg routine for dropping the table data because the data files
+        // of the Iceberg table may be located in different locations
+        dropTableData(table.io(), metadata);
+        deleteTableDirectory(session, metastoreTable);
+    }
+
+    private void deleteTableDirectory(ConnectorSession session, io.trino.plugin.hive.metastore.Table metastoreTable)
+    {
+        Path tablePath = new Path(metastoreTable.getStorage().getLocation());
+        try {
+            FileSystem fileSystem = hdfsEnvironment.getFileSystem(new HdfsContext(session), tablePath);
+            fileSystem.delete(tablePath, true);
+        }
+        catch (IOException e) {
+            throw new TrinoException(
+                    ICEBERG_FILESYSTEM_ERROR,
+                    format("Failed to delete directory %s of the table %s.%s", tablePath, metastoreTable.getDatabaseName(), metastoreTable.getTableName()),
+                    e);
+        }
     }
 
     @Override
@@ -339,6 +373,15 @@ class TrinoHiveCatalog
         else {
             icebergTable.updateProperties().set(TABLE_COMMENT, comment.get()).commit();
         }
+    }
+
+    @Override
+    public void updateColumnComment(ConnectorSession session, SchemaTableName schemaTableName, ColumnIdentity columnIdentity, Optional<String> comment)
+    {
+        metastore.commentColumn(schemaTableName.getSchemaName(), schemaTableName.getTableName(), columnIdentity.getName(), comment);
+
+        Table icebergTable = loadTable(session, schemaTableName);
+        icebergTable.updateSchema().updateColumnDoc(columnIdentity.getName(), comment.orElse(null)).commit();
     }
 
     @Override
@@ -606,6 +649,22 @@ class TrinoHiveCatalog
     @Override
     public Optional<ConnectorMaterializedViewDefinition> getMaterializedView(ConnectorSession session, SchemaTableName schemaViewName)
     {
+        try {
+            return Failsafe.with(new RetryPolicy<>()
+                            .withMaxAttempts(10)
+                            .withBackoff(1, 5_000, ChronoUnit.MILLIS, 4)
+                            .withMaxDuration(Duration.ofSeconds(30))
+                            .abortOn(failure -> !(failure instanceof MaterializedViewMayBeBeingRemovedException)))
+                    .get(() -> doGetMaterializedView(session, schemaViewName));
+        }
+        catch (MaterializedViewMayBeBeingRemovedException e) {
+            throwIfUnchecked(e.getCause());
+            throw new RuntimeException(e.getCause());
+        }
+    }
+
+    private Optional<ConnectorMaterializedViewDefinition> doGetMaterializedView(ConnectorSession session, SchemaTableName schemaViewName)
+    {
         Optional<io.trino.plugin.hive.metastore.Table> tableOptional = metastore.getTable(schemaViewName.getSchemaName(), schemaViewName.getTableName());
         if (tableOptional.isEmpty()) {
             return Optional.empty();
@@ -623,7 +682,20 @@ class TrinoHiveCatalog
         IcebergMaterializedViewDefinition definition = decodeMaterializedViewData(materializedView.getViewOriginalText()
                 .orElseThrow(() -> new TrinoException(HIVE_INVALID_METADATA, "No view original text: " + schemaViewName)));
 
-        Table icebergTable = loadTable(session, new SchemaTableName(schemaViewName.getSchemaName(), storageTable));
+        Table icebergTable;
+        try {
+            icebergTable = loadTable(session, new SchemaTableName(schemaViewName.getSchemaName(), storageTable));
+        }
+        catch (RuntimeException e) {
+            // The materialized view could be removed concurrently. This may manifest in a number of ways, e.g.
+            // - io.trino.spi.connector.TableNotFoundException
+            // - org.apache.iceberg.exceptions.NotFoundException when accessing manifest file
+            // - other failures when reading storage table's metadata files
+            // Retry, as we're catching broadly.
+            metastore.invalidateTable(schemaViewName.getSchemaName(), schemaViewName.getTableName());
+            metastore.invalidateTable(schemaViewName.getSchemaName(), storageTable);
+            throw new MaterializedViewMayBeBeingRemovedException(e);
+        }
         ImmutableMap.Builder<String, Object> properties = ImmutableMap.builder();
         properties.put(FILE_FORMAT_PROPERTY, IcebergUtil.getFileFormat(icebergTable));
         if (!icebergTable.spec().fields().isEmpty()) {
@@ -660,12 +732,12 @@ class TrinoHiveCatalog
         return listNamespaces(session);
     }
 
-    @Override
-    public void updateColumnComment(ConnectorSession session, SchemaTableName schemaTableName, ColumnIdentity columnIdentity, Optional<String> comment)
+    private static class MaterializedViewMayBeBeingRemovedException
+            extends RuntimeException
     {
-        metastore.commentColumn(schemaTableName.getSchemaName(), schemaTableName.getTableName(), columnIdentity.getName(), comment);
-
-        Table icebergTable = loadTable(session, schemaTableName);
-        icebergTable.updateSchema().updateColumnDoc(columnIdentity.getName(), comment.orElse(null)).commit();
+        public MaterializedViewMayBeBeingRemovedException(Throwable cause)
+        {
+            super(requireNonNull(cause, "cause is null"));
+        }
     }
 }

@@ -4,7 +4,7 @@
     <parent>
         <artifactId>trino-root</artifactId>
         <groupId>io.trino</groupId>
-        <version>372-SNAPSHOT</version>
+        <version>373-SNAPSHOT</version>
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
@@ -483,13 +483,6 @@
             <groupId>io.trino</groupId>
             <artifactId>trino-testing</artifactId>
             <scope>test</scope>
-            <exclusions>
-                <exclusion>
-                    <!-- not needed for pinot, and results with conflict regarding netty and apache httpclient -->
-                    <groupId>io.trino</groupId>
-                    <artifactId>trino-exchange</artifactId>
-                </exclusion>
-            </exclusions>
         </dependency>
 
         <dependency>

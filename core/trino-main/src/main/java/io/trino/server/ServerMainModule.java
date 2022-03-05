@@ -135,6 +135,7 @@ import io.trino.sql.parser.SqlParser;
 import io.trino.sql.planner.CompilerConfig;
 import io.trino.sql.planner.LocalExecutionPlanner;
 import io.trino.sql.planner.NodePartitioningManager;
+import io.trino.sql.planner.OptimizerConfig;
 import io.trino.sql.planner.RuleStatsRecorder;
 import io.trino.sql.planner.TypeAnalyzer;
 import io.trino.sql.tree.Expression;
@@ -210,6 +211,7 @@ public class ServerMainModule
         install(new InternalCommunicationModule());
 
         configBinder(binder).bindConfig(FeaturesConfig.class);
+        configBinder(binder).bindConfig(OptimizerConfig.class);
         configBinder(binder).bindConfig(ProtocolConfig.class);
 
         binder.bind(SqlParser.class).in(Scopes.SINGLETON);
