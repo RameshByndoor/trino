@@ -17,10 +17,12 @@ import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.ConfigSecuritySensitive;
 import io.airlift.configuration.DefunctConfig;
+import io.airlift.configuration.validation.FileExists;
 
 import javax.validation.constraints.Max;
 import javax.validation.constraints.Min;
 
+import java.io.File;
 import java.util.Optional;
 
 @DefunctConfig("hive.metastore.glue.use-instance-credentials")
@@ -37,7 +39,7 @@ public class GlueHiveMetastoreConfig
     private Optional<String> awsAccessKey = Optional.empty();
     private Optional<String> awsSecretKey = Optional.empty();
     private Optional<String> awsCredentialsProvider = Optional.empty();
-    private Optional<String> awsCredentialsProviderConf = Optional.empty();
+    private Optional<File> awsCredentialsProviderConf = Optional.empty();
     private Optional<String> catalogId = Optional.empty();
     private int partitionSegments = 5;
     private int getPartitionThreads = 20;
@@ -204,14 +206,14 @@ public class GlueHiveMetastoreConfig
         return this;
     }
 
-    public Optional<String> getAwsCredentialsProviderConf()
+    public Optional<@FileExists File> getAwsCredentialsProviderConf()
     {
         return awsCredentialsProviderConf;
     }
 
-    @Config("hive.metastore.glue.aws-credentials-provider-conf")
-    @ConfigDescription("Configuration details/file accepted by custom AwsCredentialsProvider class ")
-    public GlueHiveMetastoreConfig setAwsCredentialsProviderConf(String awsCredentialsProviderConf)
+    @Config("hive.metastore.glue.aws-credentials-providerconf")
+    @ConfigDescription("Location of the file contains configuration details required by AwsCredentialsProvider class")
+    public GlueHiveMetastoreConfig setAwsCredentialsProviderConf(File awsCredentialsProviderConf)
     {
         this.awsCredentialsProviderConf = Optional.ofNullable(awsCredentialsProviderConf);
         return this;

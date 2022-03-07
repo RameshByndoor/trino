@@ -69,6 +69,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import io.airlift.concurrent.MoreFutures;
+import io.airlift.configuration.validation.FileExists;
 import io.airlift.log.Logger;
 import io.trino.plugin.hive.HdfsEnvironment;
 import io.trino.plugin.hive.HdfsEnvironment.HdfsContext;
@@ -109,6 +110,7 @@ import org.apache.hadoop.fs.Path;
 import javax.annotation.Nullable;
 import javax.inject.Inject;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -226,6 +228,10 @@ public class GlueHiveMetastore
             asyncGlueClientBuilder.setRegion(getCurrentRegionFromEC2Metadata().getName());
         }
 
+        if(config.getAwsCredentialsProviderConf().isPresent()){
+            checkArgument(config.getAwsCredentialsProvider().isPresent(), "AwsCredentialsProvider class must be set when AwsCredentialsProviderConf is set");
+        }
+
         asyncGlueClientBuilder.setCredentials(getAwsCredentialsProvider(config));
 
         return asyncGlueClientBuilder.build();
@@ -233,8 +239,8 @@ public class GlueHiveMetastore
 
     private static AWSCredentialsProvider getAwsCredentialsProvider(GlueHiveMetastoreConfig config)
     {
-        if (config.getAwsCredentialsProvider().isPresent() && config.getAwsCredentialsProviderConf().isPresent()) {
-            return getCustomAWSCredentialsProvider(config.getAwsCredentialsProvider().get(),config.getAwsCredentialsProviderConf().get());
+        if (config.getAwsCredentialsProvider().isPresent()) {
+            return getCustomAWSCredentialsProvider(config.getAwsCredentialsProvider().get(), config.getAwsCredentialsProviderConf());
         }
         AWSCredentialsProvider provider;
         if (config.getAwsAccessKey().isPresent() && config.getAwsSecretKey().isPresent()) {
@@ -254,10 +260,18 @@ public class GlueHiveMetastore
         return provider;
     }
 
-    private static AWSCredentialsProvider getCustomAWSCredentialsProvider(String providerClass, String awsCredentialsProviderConf)
+    private static AWSCredentialsProvider getCustomAWSCredentialsProvider(String providerClass, Optional<@FileExists File> awsCredentialsProviderConf)
     {
         try {
-            Object instance = Class.forName(providerClass).getConstructor(String.class).newInstance(awsCredentialsProviderConf);
+            Object instance;
+            if(awsCredentialsProviderConf.isPresent()){
+                instance = Class.forName(providerClass)
+                        .getConstructor(File.class)
+                        .newInstance(awsCredentialsProviderConf.get());
+            }
+            else{
+                instance = Class.forName(providerClass).getConstructor().newInstance();
+            }
             if (!(instance instanceof AWSCredentialsProvider)) {
                 throw new RuntimeException("Invalid credentials provider class: " + instance.getClass().getName());
             }

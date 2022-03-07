@@ -13,6 +13,8 @@
  */
 package io.trino.plugin.hive;
 
+import com.amazonaws.auth.AWSCredentials;
+import com.amazonaws.auth.AWSCredentialsProvider;
 import com.google.common.collect.ImmutableMap;
 import com.qubole.rubix.core.CachingFileSystem;
 import io.trino.spi.Plugin;
@@ -124,6 +126,55 @@ public class TestHivePlugin
                         "hive.metastore.uri", "thrift://foo:1234"),
                 new TestingConnectorContext()))
                 .hasMessageContaining("Error: Configuration property 'hive.metastore.uri' was not used");
+    }
+
+    @Test
+    public void testGlueMetastoreCustomAwsCredentialsProvider()
+            throws IOException
+    {
+        ConnectorFactory factory = getHiveConnectorFactory();
+        Path customCredConf = Files.createTempFile(null, null);
+
+        assertThatThrownBy(() -> factory.create(
+                "test",
+                ImmutableMap.of(
+                        "hive.metastore", "glue",
+                        "hive.metastore.glue.region", "us-east-2",
+                        "hive.metastore.glue.aws-credentials-providerconf", customCredConf.toString()),
+                new TestingConnectorContext()))
+                .hasMessageContaining("AwsCredentialsProvider class must be set when AwsCredentialsProviderConf is set");
+
+        factory.create(
+                "test",
+                ImmutableMap.of(
+                        "hive.metastore", "glue",
+                        "hive.metastore.glue.region", "us-east-2",
+                        "hive.metastore.glue.aws-credentials-provider", TestCustomAwsProvider.class.getName(),
+                        "hive.metastore.glue.aws-credentials-providerconf", customCredConf.toString()),
+                new TestingConnectorContext())
+                .shutdown();
+    }
+
+    public static class TestCustomAwsProvider
+            implements AWSCredentialsProvider
+    {
+
+        public TestCustomAwsProvider(File configFile)
+        {
+
+        }
+
+        @Override
+        public AWSCredentials getCredentials()
+        {
+            return null;
+        }
+
+        @Override
+        public void refresh()
+        {
+
+        }
     }
 
     @Test
