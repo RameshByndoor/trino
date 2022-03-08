@@ -158,10 +158,8 @@ public class TestHivePlugin
     public static class TestCustomAwsProvider
             implements AWSCredentialsProvider
     {
-
         public TestCustomAwsProvider(File configFile)
         {
-
         }
 
         @Override
@@ -173,7 +171,6 @@ public class TestHivePlugin
         @Override
         public void refresh()
         {
-
         }
     }
 
