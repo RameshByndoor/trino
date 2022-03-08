@@ -145,13 +145,13 @@ public class TestHivePlugin
                 .hasMessageContaining("AwsCredentialsProvider class must be set when AwsCredentialsProviderConf is set");
 
         factory.create(
-                "test",
-                ImmutableMap.of(
-                        "hive.metastore", "glue",
-                        "hive.metastore.glue.region", "us-east-2",
-                        "hive.metastore.glue.aws-credentials-provider", TestCustomAwsProvider.class.getName(),
-                        "hive.metastore.glue.aws-credentials-providerconf", customCredConf.toString()),
-                new TestingConnectorContext())
+                        "test",
+                        ImmutableMap.of(
+                                "hive.metastore", "glue",
+                                "hive.metastore.glue.region", "us-east-2",
+                                "hive.metastore.glue.aws-credentials-provider", TestCustomAwsProvider.class.getName(),
+                                "hive.metastore.glue.aws-credentials-providerconf", customCredConf.toString()),
+                        new TestingConnectorContext())
                 .shutdown();
     }
 

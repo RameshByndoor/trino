@@ -228,7 +228,7 @@ public class GlueHiveMetastore
             asyncGlueClientBuilder.setRegion(getCurrentRegionFromEC2Metadata().getName());
         }
 
-        if(config.getAwsCredentialsProviderConf().isPresent()){
+        if (config.getAwsCredentialsProviderConf().isPresent()) {
             checkArgument(config.getAwsCredentialsProvider().isPresent(), "AwsCredentialsProvider class must be set when AwsCredentialsProviderConf is set");
         }
 
@@ -264,12 +264,12 @@ public class GlueHiveMetastore
     {
         try {
             Object instance;
-            if(awsCredentialsProviderConf.isPresent()){
+            if (awsCredentialsProviderConf.isPresent()) {
                 instance = Class.forName(providerClass)
                         .getConstructor(File.class)
                         .newInstance(awsCredentialsProviderConf.get());
             }
-            else{
+            else {
                 instance = Class.forName(providerClass).getConstructor().newInstance();
             }
             if (!(instance instanceof AWSCredentialsProvider)) {
