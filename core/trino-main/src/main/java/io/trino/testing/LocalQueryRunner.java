@@ -76,9 +76,14 @@ import io.trino.metadata.CatalogManager;
 import io.trino.metadata.ColumnPropertyManager;
 import io.trino.metadata.DisabledSystemSecurityMetadata;
 import io.trino.metadata.ExchangeHandleResolver;
+import io.trino.metadata.FunctionBundle;
+import io.trino.metadata.FunctionManager;
+import io.trino.metadata.GlobalFunctionCatalog;
 import io.trino.metadata.HandleResolver;
 import io.trino.metadata.InMemoryNodeManager;
 import io.trino.metadata.InternalBlockEncodingSerde;
+import io.trino.metadata.InternalFunctionBundle;
+import io.trino.metadata.LiteralFunction;
 import io.trino.metadata.MaterializedViewPropertyManager;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.MetadataManager;
@@ -89,7 +94,7 @@ import io.trino.metadata.QualifiedTablePrefix;
 import io.trino.metadata.SchemaPropertyManager;
 import io.trino.metadata.SessionPropertyManager;
 import io.trino.metadata.Split;
-import io.trino.metadata.SqlFunction;
+import io.trino.metadata.SystemFunctionBundle;
 import io.trino.metadata.TableHandle;
 import io.trino.metadata.TableProceduresPropertyManager;
 import io.trino.metadata.TableProceduresRegistry;
@@ -237,6 +242,8 @@ public class LocalQueryRunner
     private final InMemoryNodeManager nodeManager;
     private final BlockTypeOperators blockTypeOperators;
     private final PlannerContext plannerContext;
+    private final GlobalFunctionCatalog globalFunctionCatalog;
+    private final FunctionManager functionManager;
     private final StatsCalculator statsCalculator;
     private final ScalarStatsCalculator scalarStatsCalculator;
     private final CostCalculator costCalculator;
@@ -340,18 +347,20 @@ public class LocalQueryRunner
         TypeRegistry typeRegistry = new TypeRegistry(typeOperators, featuresConfig);
         TypeManager typeManager = new InternalTypeManager(typeRegistry);
         InternalBlockEncodingSerde blockEncodingSerde = new InternalBlockEncodingSerde(blockEncodingManager, typeManager);
+
+        this.globalFunctionCatalog = new GlobalFunctionCatalog();
+        globalFunctionCatalog.addFunctions(new InternalFunctionBundle(new LiteralFunction(blockEncodingSerde)));
+        globalFunctionCatalog.addFunctions(SystemFunctionBundle.create(featuresConfig, typeOperators, blockTypeOperators, nodeManager.getCurrentNode().getNodeVersion()));
+        this.functionManager = new FunctionManager(globalFunctionCatalog);
         MetadataManager metadata = new MetadataManager(
                 featuresConfig,
                 new DisabledSystemSecurityMetadata(),
                 transactionManager,
-                typeOperators,
-                blockTypeOperators,
-                typeManager,
-                blockEncodingSerde,
-                nodeManager.getCurrentNode().getNodeVersion());
-        this.plannerContext = new PlannerContext(metadata, typeOperators, blockEncodingSerde, typeManager);
+                globalFunctionCatalog,
+                typeManager);
+        this.plannerContext = new PlannerContext(metadata, typeOperators, blockEncodingSerde, typeManager, functionManager);
         this.splitManager = new SplitManager(new QueryManagerConfig());
-        this.planFragmenter = new PlanFragmenter(metadata, this.nodePartitioningManager, new QueryManagerConfig());
+        this.planFragmenter = new PlanFragmenter(metadata, functionManager, this.nodePartitioningManager, new QueryManagerConfig());
         this.joinCompiler = new JoinCompiler(typeOperators);
         PageIndexerFactory pageIndexerFactory = new GroupByHashPageIndexerFactory(joinCompiler, blockTypeOperators);
         this.groupProvider = new TestingGroupProvider();
@@ -385,9 +394,9 @@ public class LocalQueryRunner
         this.estimatedExchangesCostCalculator = new CostCalculatorWithEstimatedExchanges(costCalculator, taskCountEstimator);
         this.pageSourceManager = new PageSourceManager();
 
-        this.pageFunctionCompiler = new PageFunctionCompiler(metadata, 0);
-        this.expressionCompiler = new ExpressionCompiler(metadata, pageFunctionCompiler);
-        this.joinFilterFunctionCompiler = new JoinFilterFunctionCompiler(metadata);
+        this.pageFunctionCompiler = new PageFunctionCompiler(functionManager, 0);
+        this.expressionCompiler = new ExpressionCompiler(functionManager, pageFunctionCompiler);
+        this.joinFilterFunctionCompiler = new JoinFilterFunctionCompiler(functionManager);
 
         HandleResolver handleResolver = new HandleResolver();
 
@@ -438,7 +447,7 @@ public class LocalQueryRunner
         this.pluginManager = new PluginManager(
                 (loader, createClassLoader) -> {},
                 connectorManager,
-                metadata,
+                globalFunctionCatalog,
                 new NoOpResourceGroupManager(),
                 accessControl,
                 Optional.of(new PasswordAuthenticatorManager(new PasswordAuthenticatorConfig())),
@@ -606,6 +615,12 @@ public class LocalQueryRunner
         return sessionPropertyManager;
     }
 
+    @Override
+    public FunctionManager getFunctionManager()
+    {
+        return functionManager;
+    }
+
     public TypeOperators getTypeOperators()
     {
         return plannerContext.getTypeOperators();
@@ -697,9 +712,9 @@ public class LocalQueryRunner
     }
 
     @Override
-    public void addFunctions(List<? extends SqlFunction> functions)
+    public void addFunctions(FunctionBundle functionBundle)
     {
-        plannerContext.getMetadata().addFunctions(functions);
+        globalFunctionCatalog.addFunctions(functionBundle);
     }
 
     @Override
@@ -871,7 +886,15 @@ public class LocalQueryRunner
     private List<Driver> createDrivers(Session session, Plan plan, OutputFactory outputFactory, TaskContext taskContext)
     {
         if (printPlan) {
-            System.out.println(PlanPrinter.textLogicalPlan(plan.getRoot(), plan.getTypes(), plannerContext.getMetadata(), plan.getStatsAndCosts(), session, 0, false));
+            System.out.println(PlanPrinter.textLogicalPlan(
+                    plan.getRoot(),
+                    plan.getTypes(),
+                    plannerContext.getMetadata(),
+                    plannerContext.getFunctionManager(),
+                    plan.getStatsAndCosts(),
+                    session,
+                    0,
+                    false));
         }
 
         SubPlan subplan = createSubPlans(session, plan, true);
@@ -1073,6 +1096,7 @@ public class LocalQueryRunner
                         new DescribeOutputRewrite(sqlParser),
                         new ShowQueriesRewrite(
                                 plannerContext.getMetadata(),
+                                plannerContext.getFunctionManager(),
                                 sqlParser,
                                 accessControl,
                                 sessionPropertyManager,

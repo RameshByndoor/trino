@@ -651,7 +651,7 @@ class StatementAnalyzer
 
             /*
             TODO enable coercions based on type compatibility for INSERT of structural types containing nested bounded character types.
-            It might require defining a new range of cast operators and changes in FunctionRegistry to ensure proper handling
+            It might require defining a new range of cast operators and changes in GlobalFunctionCatalog to ensure proper handling
             of nested types.
             Currently, INSERT for such structural types is only allowed in the case of strict type coercibility.
             INSERT for other types is allowed in all cases described by the Standard. It is obtained
@@ -2105,7 +2105,7 @@ class StatementAnalyzer
 
             if (samplePercentageType != DOUBLE) {
                 ResolvedFunction coercion = metadata.getCoercion(session, samplePercentageType, DOUBLE);
-                InterpretedFunctionInvoker functionInvoker = new InterpretedFunctionInvoker(metadata);
+                InterpretedFunctionInvoker functionInvoker = new InterpretedFunctionInvoker(plannerContext.getFunctionManager());
                 samplePercentageObject = functionInvoker.invoke(coercion, session.toConnectorSession(), samplePercentageObject);
                 verify(samplePercentageObject != null, "Coercion from %s to %s returned null", samplePercentageType, DOUBLE);
             }

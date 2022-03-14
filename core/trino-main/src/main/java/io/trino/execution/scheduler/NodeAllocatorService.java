@@ -11,15 +11,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.trino.operator.aggregation;
+package io.trino.execution.scheduler;
 
-// Lambda has to be compiled into a dedicated class, as functions might be stateful (e.g. use CachedInstanceBinder)
-public interface LambdaProvider
+import io.trino.Session;
+
+public interface NodeAllocatorService
 {
-    // To support capture, we can enrich the interface into
-    // getLambda(Object[] capturedValues)
-
-    // The lambda capture is done through invokedynamic, and the CallSite will be cached after
-    // the first call. Thus separate classes have to be generated for different captures.
-    Object getLambda();
+    NodeAllocator getNodeAllocator(Session session);
 }

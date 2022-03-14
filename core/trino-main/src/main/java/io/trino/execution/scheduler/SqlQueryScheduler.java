@@ -97,7 +97,6 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -124,10 +123,12 @@ import static io.airlift.concurrent.MoreFutures.whenAnyComplete;
 import static io.airlift.http.client.HttpUriBuilder.uriBuilderFrom;
 import static io.trino.SystemSessionProperties.getConcurrentLifespansPerNode;
 import static io.trino.SystemSessionProperties.getHashPartitionCount;
-import static io.trino.SystemSessionProperties.getRetryAttempts;
+import static io.trino.SystemSessionProperties.getQueryRetryAttempts;
 import static io.trino.SystemSessionProperties.getRetryInitialDelay;
 import static io.trino.SystemSessionProperties.getRetryMaxDelay;
 import static io.trino.SystemSessionProperties.getRetryPolicy;
+import static io.trino.SystemSessionProperties.getTaskRetryAttemptsOverall;
+import static io.trino.SystemSessionProperties.getTaskRetryAttemptsPerTask;
 import static io.trino.SystemSessionProperties.getWriterMinSize;
 import static io.trino.connector.CatalogName.isInternalSystemConnector;
 import static io.trino.execution.BasicStageStats.aggregateBasicStageStats;
@@ -175,6 +176,8 @@ public class SqlQueryScheduler
     private final QueryStateMachine queryStateMachine;
     private final NodePartitioningManager nodePartitioningManager;
     private final NodeScheduler nodeScheduler;
+    private final NodeAllocatorService nodeAllocatorService;
+    private final PartitionMemoryEstimator partitionMemoryEstimator;
     private final int splitBatchSize;
     private final ExecutorService executor;
     private final ScheduledExecutorService schedulerExecutor;
@@ -192,7 +195,9 @@ public class SqlQueryScheduler
     private final CoordinatorStagesScheduler coordinatorStagesScheduler;
 
     private final RetryPolicy retryPolicy;
-    private final int maxRetryAttempts;
+    private final int maxQueryRetryAttempts;
+    private final int maxTaskRetryAttemptsOverall;
+    private final int maxTaskRetryAttemptsPerTask;
     private final AtomicInteger currentAttempt = new AtomicInteger();
     private final Duration retryInitialDelay;
     private final Duration retryMaxDelay;
@@ -210,6 +215,8 @@ public class SqlQueryScheduler
             SubPlan plan,
             NodePartitioningManager nodePartitioningManager,
             NodeScheduler nodeScheduler,
+            NodeAllocatorService nodeAllocatorService,
+            PartitionMemoryEstimator partitionMemoryEstimator,
             RemoteTaskFactory remoteTaskFactory,
             boolean summarizeTaskInfo,
             int splitBatchSize,
@@ -231,6 +238,8 @@ public class SqlQueryScheduler
         this.queryStateMachine = requireNonNull(queryStateMachine, "queryStateMachine is null");
         this.nodePartitioningManager = requireNonNull(nodePartitioningManager, "nodePartitioningManager is null");
         this.nodeScheduler = requireNonNull(nodeScheduler, "nodeScheduler is null");
+        this.nodeAllocatorService = requireNonNull(nodeAllocatorService, "nodeAllocatorService is null");
+        this.partitionMemoryEstimator = requireNonNull(partitionMemoryEstimator, "partitionMemoryEstimator is null");
         this.splitBatchSize = splitBatchSize;
         this.executor = requireNonNull(queryExecutor, "queryExecutor is null");
         this.schedulerExecutor = requireNonNull(schedulerExecutor, "schedulerExecutor is null");
@@ -265,7 +274,9 @@ public class SqlQueryScheduler
                 coordinatorTaskManager);
 
         retryPolicy = getRetryPolicy(queryStateMachine.getSession());
-        maxRetryAttempts = getRetryAttempts(queryStateMachine.getSession());
+        maxQueryRetryAttempts = getQueryRetryAttempts(queryStateMachine.getSession());
+        maxTaskRetryAttemptsOverall = getTaskRetryAttemptsOverall(queryStateMachine.getSession());
+        maxTaskRetryAttemptsPerTask = getTaskRetryAttemptsPerTask(queryStateMachine.getSession());
         retryInitialDelay = getRetryInitialDelay(queryStateMachine.getSession());
         retryMaxDelay = getRetryMaxDelay(queryStateMachine.getSession());
     }
@@ -339,10 +350,12 @@ public class SqlQueryScheduler
                         exchangeManager,
                         nodePartitioningManager,
                         coordinatorStagesScheduler.getTaskLifecycleListener(),
-                        maxRetryAttempts,
+                        maxTaskRetryAttemptsOverall,
+                        maxTaskRetryAttemptsPerTask,
                         schedulerExecutor,
                         schedulerStats,
-                        nodeScheduler);
+                        nodeAllocatorService,
+                        partitionMemoryEstimator);
                 break;
             case QUERY:
             case NONE:
@@ -416,7 +429,7 @@ public class SqlQueryScheduler
 
     private boolean shouldRetry(ErrorCode errorCode)
     {
-        return retryPolicy == RetryPolicy.QUERY && currentAttempt.get() < maxRetryAttempts && isRetryableErrorCode(errorCode);
+        return retryPolicy == RetryPolicy.QUERY && currentAttempt.get() < maxQueryRetryAttempts && isRetryableErrorCode(errorCode);
     }
 
     private static boolean isRetryableErrorCode(ErrorCode errorCode)
@@ -1727,7 +1740,6 @@ public class SqlQueryScheduler
         private final List<FaultTolerantStageScheduler> schedulers;
         private final SplitSchedulerStats schedulerStats;
         private final NodeAllocator nodeAllocator;
-        private final ScheduledFuture<?> nodeUpdateTask;
 
         private final AtomicBoolean started = new AtomicBoolean();
 
@@ -1740,10 +1752,12 @@ public class SqlQueryScheduler
                 ExchangeManager exchangeManager,
                 NodePartitioningManager nodePartitioningManager,
                 TaskLifecycleListener coordinatorTaskLifecycleListener,
-                int retryAttempts,
+                int taskRetryAttemptsOverall,
+                int taskRetryAttemptsPerTask,
                 ScheduledExecutorService scheduledExecutorService,
                 SplitSchedulerStats schedulerStats,
-                NodeScheduler nodeScheduler)
+                NodeAllocatorService nodeAllocatorService,
+                PartitionMemoryEstimator partitionMemoryEstimator)
         {
             taskDescriptorStorage.initialize(queryStateMachine.getQueryId());
             queryStateMachine.addStateChangeListener(state -> {
@@ -1760,9 +1774,7 @@ public class SqlQueryScheduler
 
             ImmutableList.Builder<FaultTolerantStageScheduler> schedulers = ImmutableList.builder();
             Map<PlanFragmentId, Exchange> exchanges = new HashMap<>();
-
-            FixedCountNodeAllocator nodeAllocator = new FixedCountNodeAllocator(nodeScheduler, session, 1);
-            ScheduledFuture<?> nodeUpdateTask = scheduledExecutorService.scheduleAtFixedRate(nodeAllocator::updateNodes, 5, 5, SECONDS);
+            NodeAllocator nodeAllocator = nodeAllocatorService.getNodeAllocator(session);
 
             try {
                 // root to children order
@@ -1807,13 +1819,15 @@ public class SqlQueryScheduler
                             taskSourceFactory,
                             nodeAllocator,
                             taskDescriptorStorage,
+                            partitionMemoryEstimator,
                             taskLifecycleListener,
                             exchange,
                             bucketToPartitionCache.apply(fragment.getPartitioningScheme().getPartitioning().getHandle()).getBucketToPartitionMap(),
                             sourceExchanges.buildOrThrow(),
                             inputBucketToPartition.getBucketToPartitionMap(),
                             inputBucketToPartition.getBucketNodeMap(),
-                            retryAttempts);
+                            taskRetryAttemptsOverall,
+                            taskRetryAttemptsPerTask);
 
                     schedulers.add(scheduler);
                 }
@@ -1830,8 +1844,7 @@ public class SqlQueryScheduler
                         queryStateMachine,
                         schedulers.build(),
                         schedulerStats,
-                        nodeAllocator,
-                        nodeUpdateTask);
+                        nodeAllocator);
             }
             catch (Throwable t) {
                 for (FaultTolerantStageScheduler scheduler : schedulers.build()) {
@@ -1845,7 +1858,6 @@ public class SqlQueryScheduler
                     }
                 }
 
-                nodeUpdateTask.cancel(true);
                 try {
                     nodeAllocator.close();
                 }
@@ -1933,15 +1945,13 @@ public class SqlQueryScheduler
                 QueryStateMachine queryStateMachine,
                 List<FaultTolerantStageScheduler> schedulers,
                 SplitSchedulerStats schedulerStats,
-                NodeAllocator nodeAllocator,
-                ScheduledFuture<?> nodeUpdateTask)
+                NodeAllocator nodeAllocator)
         {
             this.stateMachine = requireNonNull(stateMachine, "stateMachine is null");
             this.queryStateMachine = requireNonNull(queryStateMachine, "queryStateMachine is null");
             this.schedulers = requireNonNull(schedulers, "schedulers is null");
             this.schedulerStats = requireNonNull(schedulerStats, "schedulerStats is null");
             this.nodeAllocator = requireNonNull(nodeAllocator, "nodeAllocator is null");
-            this.nodeUpdateTask = requireNonNull(nodeUpdateTask, "nodeUpdateTask is null");
         }
 
         @Override
@@ -2051,7 +2061,6 @@ public class SqlQueryScheduler
 
         private void closeNodeAllocator()
         {
-            nodeUpdateTask.cancel(true);
             try {
                 nodeAllocator.close();
             }

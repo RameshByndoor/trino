@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.inject.Binder;
 import com.google.inject.Provides;
 import com.google.inject.Scopes;
+import com.google.inject.multibindings.ProvidesIntoSet;
 import io.airlift.concurrent.BoundedExecutor;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
 import io.airlift.http.server.HttpServerConfig;
@@ -67,9 +68,14 @@ import io.trino.metadata.ColumnPropertyManager;
 import io.trino.metadata.DisabledSystemSecurityMetadata;
 import io.trino.metadata.DiscoveryNodeManager;
 import io.trino.metadata.ForNodeManager;
+import io.trino.metadata.FunctionBundle;
+import io.trino.metadata.FunctionManager;
+import io.trino.metadata.GlobalFunctionCatalog;
 import io.trino.metadata.HandleJsonModule;
 import io.trino.metadata.InternalBlockEncodingSerde;
+import io.trino.metadata.InternalFunctionBundle;
 import io.trino.metadata.InternalNodeManager;
+import io.trino.metadata.LiteralFunction;
 import io.trino.metadata.MaterializedViewPropertyManager;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.MetadataManager;
@@ -78,6 +84,7 @@ import io.trino.metadata.SchemaPropertyManager;
 import io.trino.metadata.SessionPropertyManager;
 import io.trino.metadata.StaticCatalogStore;
 import io.trino.metadata.StaticCatalogStoreConfig;
+import io.trino.metadata.SystemFunctionBundle;
 import io.trino.metadata.SystemSecurityMetadata;
 import io.trino.metadata.TableProceduresPropertyManager;
 import io.trino.metadata.TableProceduresRegistry;
@@ -154,6 +161,7 @@ import javax.inject.Inject;
 import javax.inject.Singleton;
 
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
@@ -376,6 +384,7 @@ public class ServerMainModule
                 .setDefault()
                 .to(DisabledSystemSecurityMetadata.class)
                 .in(Scopes.SINGLETON);
+        binder.bind(GlobalFunctionCatalog.class).in(Scopes.SINGLETON);
         binder.bind(TypeOperatorsCache.class).in(Scopes.SINGLETON);
         newExporter(binder).export(TypeOperatorsCache.class).as(factory -> factory.generatedNameOf(TypeOperators.class));
         binder.bind(BlockTypeOperators.class).in(Scopes.SINGLETON);
@@ -383,6 +392,11 @@ public class ServerMainModule
         binder.bind(ProcedureRegistry.class).in(Scopes.SINGLETON);
         binder.bind(TableProceduresRegistry.class).in(Scopes.SINGLETON);
         binder.bind(PlannerContext.class).in(Scopes.SINGLETON);
+
+        // function
+        binder.bind(FunctionManager.class).in(Scopes.SINGLETON);
+        newSetBinder(binder, FunctionBundle.class);
+        binder.bind(RegisterFunctionBundles.class).asEagerSingleton();
 
         // type
         binder.bind(TypeAnalyzer.class).in(Scopes.SINGLETON);
@@ -482,6 +496,32 @@ public class ServerMainModule
 
         // cleanup
         binder.bind(ExecutorCleanup.class).in(Scopes.SINGLETON);
+    }
+
+    private static class RegisterFunctionBundles
+    {
+        @Inject
+        public RegisterFunctionBundles(GlobalFunctionCatalog globalFunctionCatalog, Set<FunctionBundle> functionBundles)
+        {
+            for (FunctionBundle functionBundle : functionBundles) {
+                globalFunctionCatalog.addFunctions(functionBundle);
+            }
+        }
+    }
+
+    @ProvidesIntoSet
+    @Singleton
+    public static FunctionBundle systemFunctionBundle(FeaturesConfig featuresConfig, TypeOperators typeOperators, BlockTypeOperators blockTypeOperators, NodeVersion nodeVersion)
+    {
+        return SystemFunctionBundle.create(featuresConfig, typeOperators, blockTypeOperators, nodeVersion);
+    }
+
+    @ProvidesIntoSet
+    @Singleton
+    // literal function must be registered lazily to break circular dependency
+    public static FunctionBundle literalFunctionBundle(BlockEncodingSerde blockEncodingSerde)
+    {
+        return new InternalFunctionBundle(new LiteralFunction(blockEncodingSerde));
     }
 
     @Provides

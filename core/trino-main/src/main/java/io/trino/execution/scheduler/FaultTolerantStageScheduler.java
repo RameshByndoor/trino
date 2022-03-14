@@ -33,8 +33,8 @@ import io.trino.execution.TaskId;
 import io.trino.execution.TaskState;
 import io.trino.execution.TaskStatus;
 import io.trino.execution.buffer.OutputBuffers;
+import io.trino.execution.scheduler.PartitionMemoryEstimator.MemoryRequirements;
 import io.trino.failuredetector.FailureDetector;
-import io.trino.metadata.InternalNode;
 import io.trino.metadata.Split;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.TrinoException;
@@ -94,6 +94,8 @@ public class FaultTolerantStageScheduler
     private final TaskSourceFactory taskSourceFactory;
     private final NodeAllocator nodeAllocator;
     private final TaskDescriptorStorage taskDescriptorStorage;
+    private final PartitionMemoryEstimator partitionMemoryEstimator;
+    private final int maxRetryAttemptsPerTask;
 
     private final TaskLifecycleListener taskLifecycleListener;
     // empty when the results are consumed via a direct exchange
@@ -108,7 +110,7 @@ public class FaultTolerantStageScheduler
     private ListenableFuture<Void> blocked = immediateVoidFuture();
 
     @GuardedBy("this")
-    private ListenableFuture<InternalNode> acquireNodeFuture;
+    private NodeAllocator.NodeLease nodeLease;
     @GuardedBy("this")
     private SettableFuture<Void> taskFinishedFuture;
 
@@ -121,7 +123,7 @@ public class FaultTolerantStageScheduler
     @GuardedBy("this")
     private final Map<TaskId, RemoteTask> runningTasks = new HashMap<>();
     @GuardedBy("this")
-    private final Map<TaskId, InternalNode> runningNodes = new HashMap<>();
+    private final Map<TaskId, NodeAllocator.NodeLease> runningNodes = new HashMap<>();
     @GuardedBy("this")
     private final Set<Integer> allPartitions = new HashSet<>();
     @GuardedBy("this")
@@ -129,7 +131,11 @@ public class FaultTolerantStageScheduler
     @GuardedBy("this")
     private final Set<Integer> finishedPartitions = new HashSet<>();
     @GuardedBy("this")
-    private int remainingRetryAttempts;
+    private int remainingRetryAttemptsOverall;
+    @GuardedBy("this")
+    private final Map<Integer, Integer> remainingAttemptsPerTask = new HashMap<>();
+    @GuardedBy("this")
+    private Map<Integer, MemoryRequirements> partitionMemoryRequirements = new HashMap<>();
 
     @GuardedBy("this")
     private Throwable failure;
@@ -143,13 +149,15 @@ public class FaultTolerantStageScheduler
             TaskSourceFactory taskSourceFactory,
             NodeAllocator nodeAllocator,
             TaskDescriptorStorage taskDescriptorStorage,
+            PartitionMemoryEstimator partitionMemoryEstimator,
             TaskLifecycleListener taskLifecycleListener,
             Optional<Exchange> sinkExchange,
             Optional<int[]> sinkBucketToPartitionMap,
             Map<PlanFragmentId, Exchange> sourceExchanges,
             Optional<int[]> sourceBucketToPartitionMap,
             Optional<BucketNodeMap> sourceBucketNodeMap,
-            int retryAttempts)
+            int taskRetryAttemptsOverall,
+            int taskRetryAttemptsPerTask)
     {
         checkArgument(!stage.getFragment().getStageExecutionDescriptor().isStageGroupedExecution(), "grouped execution is expected to be disabled");
 
@@ -159,14 +167,16 @@ public class FaultTolerantStageScheduler
         this.taskSourceFactory = requireNonNull(taskSourceFactory, "taskSourceFactory is null");
         this.nodeAllocator = requireNonNull(nodeAllocator, "nodeAllocator is null");
         this.taskDescriptorStorage = requireNonNull(taskDescriptorStorage, "taskDescriptorStorage is null");
+        this.partitionMemoryEstimator = requireNonNull(partitionMemoryEstimator, "partitionMemoryEstimator is null");
         this.taskLifecycleListener = requireNonNull(taskLifecycleListener, "taskLifecycleListener is null");
         this.sinkExchange = requireNonNull(sinkExchange, "sinkExchange is null");
         this.sinkBucketToPartitionMap = requireNonNull(sinkBucketToPartitionMap, "sinkBucketToPartitionMap is null");
         this.sourceExchanges = ImmutableMap.copyOf(requireNonNull(sourceExchanges, "sourceExchanges is null"));
         this.sourceBucketToPartitionMap = requireNonNull(sourceBucketToPartitionMap, "sourceBucketToPartitionMap is null");
         this.sourceBucketNodeMap = requireNonNull(sourceBucketNodeMap, "sourceBucketNodeMap is null");
-        checkArgument(retryAttempts >= 0, "retryAttempts must be greater than or equal to 0: %s", retryAttempts);
-        this.remainingRetryAttempts = retryAttempts;
+        checkArgument(taskRetryAttemptsOverall >= 0, "taskRetryAttemptsOverall must be greater than or equal to 0: %s", taskRetryAttemptsOverall);
+        this.remainingRetryAttemptsOverall = taskRetryAttemptsOverall;
+        this.maxRetryAttemptsPerTask = taskRetryAttemptsPerTask;
     }
 
     public StageId getStageId()
@@ -254,15 +264,17 @@ public class FaultTolerantStageScheduler
             }
             TaskDescriptor taskDescriptor = taskDescriptorOptional.get();
 
-            if (acquireNodeFuture == null) {
-                acquireNodeFuture = nodeAllocator.acquire(taskDescriptor.getNodeRequirements());
+            MemoryRequirements memoryRequirements = partitionMemoryRequirements.computeIfAbsent(partition, ignored -> partitionMemoryEstimator.getInitialMemoryRequirements(session, taskDescriptor.getNodeRequirements().getMemory()));
+            if (nodeLease == null) {
+                NodeRequirements nodeRequirements = taskDescriptor.getNodeRequirements();
+                nodeRequirements = nodeRequirements.withMemory(memoryRequirements.getRequiredMemory());
+                nodeLease = nodeAllocator.acquire(nodeRequirements);
             }
-            if (!acquireNodeFuture.isDone()) {
-                blocked = asVoid(acquireNodeFuture);
+            if (!nodeLease.getNode().isDone()) {
+                blocked = asVoid(nodeLease.getNode());
                 return;
             }
-            InternalNode node = getFutureValue(acquireNodeFuture);
-            acquireNodeFuture = null;
+            NodeInfo node = getFutureValue(nodeLease.getNode());
 
             queuedPartitions.poll();
 
@@ -300,7 +312,7 @@ public class FaultTolerantStageScheduler
                     .build();
 
             RemoteTask task = stage.createTask(
-                    node,
+                    node.getNode(),
                     partition,
                     attemptId,
                     sinkBucketToPartitionMap,
@@ -312,7 +324,8 @@ public class FaultTolerantStageScheduler
 
             partitionToRemoteTaskMap.put(partition, task);
             runningTasks.put(task.getTaskId(), task);
-            runningNodes.put(task.getTaskId(), node);
+            runningNodes.put(task.getTaskId(), nodeLease);
+            nodeLease = null;
 
             if (taskFinishedFuture == null) {
                 taskFinishedFuture = SettableFuture.create();
@@ -403,16 +416,13 @@ public class FaultTolerantStageScheduler
     private void releaseAcquiredNode()
     {
         verify(!Thread.holdsLock(this));
-        ListenableFuture<InternalNode> future;
+        NodeAllocator.NodeLease lease;
         synchronized (this) {
-            future = acquireNodeFuture;
-            acquireNodeFuture = null;
+            lease = nodeLease;
+            nodeLease = null;
         }
-        if (future != null) {
-            future.cancel(true);
-            if (future.isDone() && !future.isCancelled()) {
-                nodeAllocator.release(getFutureValue(future));
-            }
+        if (lease != null) {
+            lease.release();
         }
     }
 
@@ -498,8 +508,8 @@ public class FaultTolerantStageScheduler
                     taskFinishedFuture = null;
                 }
 
-                InternalNode node = requireNonNull(runningNodes.remove(taskId), () -> "node not found for task id: " + taskId);
-                nodeAllocator.release(node);
+                NodeAllocator.NodeLease nodeLease = requireNonNull(runningNodes.remove(taskId), () -> "node not found for task id: " + taskId);
+                nodeLease.release();
 
                 int partitionId = taskId.getPartitionId();
 
@@ -526,8 +536,19 @@ public class FaultTolerantStageScheduler
                                     .orElse(toFailure(new TrinoException(GENERIC_INTERNAL_ERROR, "A task failed for an unknown reason")));
                             log.warn(failureInfo.toException(), "Task failed: %s", taskId);
                             ErrorCode errorCode = failureInfo.getErrorCode();
-                            if (remainingRetryAttempts > 0 && (errorCode == null || errorCode.getType() != USER_ERROR)) {
-                                remainingRetryAttempts--;
+
+                            int taskRemainingAttempts = remainingAttemptsPerTask.getOrDefault(partitionId, maxRetryAttemptsPerTask);
+                            if (remainingRetryAttemptsOverall > 0 && taskRemainingAttempts > 0 && (errorCode == null || errorCode.getType() != USER_ERROR)) {
+                                remainingRetryAttemptsOverall--;
+                                remainingAttemptsPerTask.put(partitionId, taskRemainingAttempts - 1);
+
+                                // update memory limits for next attempt
+                                MemoryRequirements memoryLimits = partitionMemoryRequirements.get(partitionId);
+                                verify(memoryLimits != null);
+                                MemoryRequirements newMemoryLimits = partitionMemoryEstimator.getNextRetryMemoryRequirements(session, memoryLimits, errorCode);
+                                partitionMemoryRequirements.put(partitionId, newMemoryLimits);
+
+                                // reschedule
                                 queuedPartitions.add(partitionId);
                                 log.debug("Retrying partition %s for stage %s", partitionId, stage.getStageId());
                             }

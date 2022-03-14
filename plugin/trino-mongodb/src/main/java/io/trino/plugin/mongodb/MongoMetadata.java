@@ -39,6 +39,7 @@ import io.trino.spi.connector.SchemaTablePrefix;
 import io.trino.spi.connector.SortingProperty;
 import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.statistics.ComputedStatistics;
 
 import java.util.Collection;
@@ -49,6 +50,7 @@ import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.lang.Math.toIntExact;
@@ -74,6 +76,19 @@ public class MongoMetadata
     public List<String> listSchemaNames(ConnectorSession session)
     {
         return mongoSession.getAllSchemas();
+    }
+
+    @Override
+    public void createSchema(ConnectorSession session, String schemaName, Map<String, Object> properties, TrinoPrincipal owner)
+    {
+        checkArgument(properties.isEmpty(), "Can't have properties for schema creation");
+        mongoSession.createSchema(schemaName);
+    }
+
+    @Override
+    public void dropSchema(ConnectorSession session, String schemaName)
+    {
+        mongoSession.dropSchema(schemaName);
     }
 
     @Override
@@ -157,7 +172,7 @@ public class MongoMetadata
     @Override
     public void createTable(ConnectorSession session, ConnectorTableMetadata tableMetadata, boolean ignoreExisting)
     {
-        mongoSession.createTable(tableMetadata.getTable(), buildColumnHandles(tableMetadata));
+        mongoSession.createTable(tableMetadata.getTable(), buildColumnHandles(tableMetadata), tableMetadata.getComment());
     }
 
     @Override
@@ -166,6 +181,13 @@ public class MongoMetadata
         MongoTableHandle table = (MongoTableHandle) tableHandle;
 
         mongoSession.dropTable(table.getSchemaTableName());
+    }
+
+    @Override
+    public void setTableComment(ConnectorSession session, ConnectorTableHandle tableHandle, Optional<String> comment)
+    {
+        MongoTableHandle table = (MongoTableHandle) tableHandle;
+        mongoSession.setTableComment(table.getSchemaTableName(), comment);
     }
 
     @Override
@@ -185,7 +207,7 @@ public class MongoMetadata
     {
         List<MongoColumnHandle> columns = buildColumnHandles(tableMetadata);
 
-        mongoSession.createTable(tableMetadata.getTable(), columns);
+        mongoSession.createTable(tableMetadata.getTable(), columns, tableMetadata.getComment());
 
         setRollback(() -> mongoSession.dropTable(tableMetadata.getTable()));
 
@@ -317,7 +339,8 @@ public class MongoMetadata
 
     private ConnectorTableMetadata getTableMetadata(ConnectorSession session, SchemaTableName tableName)
     {
-        MongoTableHandle tableHandle = mongoSession.getTable(tableName).getTableHandle();
+        MongoTable mongoTable = mongoSession.getTable(tableName);
+        MongoTableHandle tableHandle = mongoTable.getTableHandle();
 
         List<ColumnMetadata> columns = ImmutableList.copyOf(
                 getColumnHandles(session, tableHandle).values().stream()
@@ -325,7 +348,7 @@ public class MongoMetadata
                         .map(MongoColumnHandle::toColumnMetadata)
                         .collect(toList()));
 
-        return new ConnectorTableMetadata(tableName, columns);
+        return new ConnectorTableMetadata(tableName, columns, ImmutableMap.of(), mongoTable.getComment());
     }
 
     private static List<MongoColumnHandle> buildColumnHandles(ConnectorTableMetadata tableMetadata)

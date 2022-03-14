@@ -15,8 +15,9 @@ package io.trino.metadata;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import io.trino.FeaturesConfig;
+import io.trino.client.NodeVersion;
 import io.trino.operator.scalar.ChoicesScalarFunctionImplementation;
-import io.trino.operator.scalar.CustomFunctions;
 import io.trino.operator.scalar.ScalarFunctionImplementation;
 import io.trino.spi.function.OperatorType;
 import io.trino.spi.function.ScalarFunction;
@@ -24,8 +25,11 @@ import io.trino.spi.function.SqlType;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.StandardTypes;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeOperators;
 import io.trino.spi.type.TypeSignature;
 import io.trino.sql.tree.QualifiedName;
+import io.trino.type.BlockTypeOperators;
+import io.trino.type.UnknownType;
 import org.testng.annotations.Test;
 
 import java.lang.invoke.MethodHandles;
@@ -35,9 +39,8 @@ import java.util.Set;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
-import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.metadata.FunctionKind.SCALAR;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
+import static io.trino.metadata.InternalFunctionBundle.extractFunctions;
 import static io.trino.metadata.Signature.mangleOperatorName;
 import static io.trino.metadata.Signature.typeVariable;
 import static io.trino.metadata.Signature.unmangleOperator;
@@ -48,14 +51,13 @@ import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.HyperLogLogType.HYPER_LOG_LOG;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypeSignatures;
 import static io.trino.sql.analyzer.TypeSignatureTranslator.parseTypeSignature;
-import static io.trino.type.UnknownType.UNKNOWN;
 import static java.util.Collections.nCopies;
 import static java.util.stream.Collectors.toList;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 
-public class TestFunctionRegistry
+public class TestGlobalFunctionCatalog
 {
     @Test
     public void testIdentityCast()
@@ -94,16 +96,13 @@ public class TestFunctionRegistry
     @Test
     public void testDuplicateFunctions()
     {
-        List<SqlFunction> functions = new FunctionListBuilder()
-                .scalars(CustomFunctions.class)
-                .getFunctions()
-                .stream()
-                .filter(input -> input.getFunctionMetadata().getSignature().getName().equals("custom_add"))
-                .collect(toImmutableList());
+        FunctionBundle functionBundle = extractFunctions(CustomAdd.class);
 
-        Metadata metadata = createTestMetadataManager();
-        metadata.addFunctions(functions);
-        assertThatThrownBy(() -> metadata.addFunctions(functions))
+        TypeOperators typeOperators = new TypeOperators();
+        GlobalFunctionCatalog globalFunctionCatalog = new GlobalFunctionCatalog();
+        globalFunctionCatalog.addFunctions(SystemFunctionBundle.create(new FeaturesConfig(), typeOperators, new BlockTypeOperators(typeOperators), NodeVersion.UNKNOWN));
+        globalFunctionCatalog.addFunctions(functionBundle);
+        assertThatThrownBy(() -> globalFunctionCatalog.addFunctions(functionBundle))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageMatching("\\QFunction already registered: custom_add(bigint,bigint):bigint\\E");
     }
@@ -111,11 +110,12 @@ public class TestFunctionRegistry
     @Test
     public void testConflictingScalarAggregation()
     {
-        List<SqlFunction> functions = new FunctionListBuilder()
-                .scalars(ScalarSum.class)
-                .getFunctions();
+        FunctionBundle functions = extractFunctions(ScalarSum.class);
 
-        assertThatThrownBy(() -> createTestMetadataManager().addFunctions(functions))
+        TypeOperators typeOperators = new TypeOperators();
+        GlobalFunctionCatalog globalFunctionCatalog = new GlobalFunctionCatalog();
+        globalFunctionCatalog.addFunctions(SystemFunctionBundle.create(new FeaturesConfig(), typeOperators, new BlockTypeOperators(typeOperators), NodeVersion.UNKNOWN));
+        assertThatThrownBy(() -> globalFunctionCatalog.addFunctions(functions))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("'sum' is both an aggregation and a scalar function");
     }
@@ -214,7 +214,7 @@ public class TestFunctionRegistry
                                 ImmutableList.of(Signature.withVariadicBound("T1", "row"),
                                         Signature.withVariadicBound("T2", "row"),
                                         Signature.withVariadicBound("T3", "row"))))
-                .forParameters(UNKNOWN, BIGINT, BIGINT)
+                .forParameters(UnknownType.UNKNOWN, BIGINT, BIGINT)
                 .returns(functionSignature("bigint", "bigint", "bigint"));
     }
 
@@ -224,7 +224,7 @@ public class TestFunctionRegistry
         assertThatResolveFunction()
                 .among(
                         functionSignature("bigint"))
-                .forParameters(UNKNOWN)
+                .forParameters(UnknownType.UNKNOWN)
                 .returns(functionSignature("bigint"));
 
         // when coercion between the types exist, and the most specific function can be determined with the main algorithm
@@ -232,7 +232,7 @@ public class TestFunctionRegistry
                 .among(
                         functionSignature("bigint"),
                         functionSignature("integer"))
-                .forParameters(UNKNOWN)
+                .forParameters(UnknownType.UNKNOWN)
                 .returns(functionSignature("integer"));
 
         // function that requires only unknown coercion must be preferred
@@ -240,7 +240,7 @@ public class TestFunctionRegistry
                 .among(
                         functionSignature("bigint", "bigint"),
                         functionSignature("integer", "integer"))
-                .forParameters(UNKNOWN, BIGINT)
+                .forParameters(UnknownType.UNKNOWN, BIGINT)
                 .returns(functionSignature("bigint", "bigint"));
 
         // when coercion between the types doesn't exist, but the return type is the same, so the random function must be chosen
@@ -248,7 +248,7 @@ public class TestFunctionRegistry
                 .among(
                         functionSignature(ImmutableList.of("JoniRegExp"), "boolean"),
                         functionSignature(ImmutableList.of("integer"), "boolean"))
-                .forParameters(UNKNOWN)
+                .forParameters(UnknownType.UNKNOWN)
                 // any function can be selected, but to make it deterministic we sort function signatures alphabetically
                 .returns(functionSignature("JoniRegExp"));
 
@@ -257,7 +257,7 @@ public class TestFunctionRegistry
                 .among(
                         functionSignature(ImmutableList.of("JoniRegExp"), "JoniRegExp"),
                         functionSignature(ImmutableList.of("integer"), "integer"))
-                .forParameters(UNKNOWN)
+                .forParameters(UnknownType.UNKNOWN)
                 .failsWithMessage("Could not choose a best candidate operator. Explicit type casts must be added.");
     }
 
@@ -336,12 +336,12 @@ public class TestFunctionRegistry
 
         private BoundSignature resolveSignature()
         {
-            Metadata metadata = createTestMetadataManager();
-            metadata.addFunctions(createFunctionsFromSignatures());
-            return metadata.resolveFunction(TEST_SESSION, QualifiedName.of(TEST_FUNCTION_NAME), fromTypeSignatures(parameterTypes)).getSignature();
+            return new TestingFunctionResolution(createFunctionsFromSignatures())
+                    .resolveFunction(QualifiedName.of(TEST_FUNCTION_NAME), fromTypeSignatures(parameterTypes))
+                    .getSignature();
         }
 
-        private List<SqlFunction> createFunctionsFromSignatures()
+        private InternalFunctionBundle createFunctionsFromSignatures()
         {
             ImmutableList.Builder<SqlFunction> functions = ImmutableList.builder();
             for (SignatureBuilder functionSignature : functionSignatures) {
@@ -366,7 +366,7 @@ public class TestFunctionRegistry
                     }
                 });
             }
-            return functions.build();
+            return new InternalFunctionBundle(functions.build());
         }
 
         private static List<TypeSignature> parseTypeSignatures(Type... signatures)
@@ -387,6 +387,18 @@ public class TestFunctionRegistry
         public static long sum(@SqlType(StandardTypes.BIGINT) long a, @SqlType(StandardTypes.BIGINT) long b)
         {
             return a + b;
+        }
+    }
+
+    public static final class CustomAdd
+    {
+        private CustomAdd() {}
+
+        @ScalarFunction
+        @SqlType(StandardTypes.BIGINT)
+        public static long customAdd(@SqlType(StandardTypes.BIGINT) long x, @SqlType(StandardTypes.BIGINT) long y)
+        {
+            return x + y;
         }
     }
 }

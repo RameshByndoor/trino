@@ -19,6 +19,7 @@ import io.airlift.configuration.LegacyConfig;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 
+import javax.validation.constraints.Max;
 import javax.validation.constraints.Min;
 import javax.validation.constraints.NotNull;
 
@@ -34,6 +35,7 @@ public class OptimizerConfig
 
     private DataSize joinMaxBroadcastTableSize = DataSize.of(100, MEGABYTE);
     private JoinDistributionType joinDistributionType = JoinDistributionType.AUTOMATIC;
+    private double joinMultiClauseIndependenceFactor = 0.25;
 
     private JoinReorderingStrategy joinReorderingStrategy = JoinReorderingStrategy.AUTOMATIC;
     private int maxReorderedJoins = 9;
@@ -43,6 +45,7 @@ public class OptimizerConfig
     private boolean collectPlanStatisticsForAllQueries;
     private boolean ignoreStatsCalculatorFailures = true;
     private boolean defaultFilterFactorEnabled;
+    private double filterConjunctionIndependenceFactor = 0.75;
 
     private boolean colocatedJoinsEnabled;
     private boolean distributedIndexJoinsEnabled;
@@ -77,6 +80,10 @@ public class OptimizerConfig
     private double tableScanNodePartitioningMinBucketToTaskRatio = 0.5;
     private boolean mergeProjectWithValues = true;
     private boolean forceSingleNodeOutput = true;
+    // adaptive partial aggregation
+    private boolean adaptivePartialAggregationEnabled = true;
+    private long adaptivePartialAggregationMinRows = 100_000;
+    private double adaptivePartialAggregationUniqueRowsRatioThreshold = 0.8;
 
     public enum JoinReorderingStrategy
     {
@@ -161,6 +168,21 @@ public class OptimizerConfig
     public OptimizerConfig setJoinMaxBroadcastTableSize(DataSize joinMaxBroadcastTableSize)
     {
         this.joinMaxBroadcastTableSize = joinMaxBroadcastTableSize;
+        return this;
+    }
+
+    @Min(0)
+    @Max(1)
+    public double getJoinMultiClauseIndependenceFactor()
+    {
+        return joinMultiClauseIndependenceFactor;
+    }
+
+    @Config("optimizer.join-multi-clause-independence-factor")
+    @ConfigDescription("Scales the strength of independence assumption for selectivity estimates of multi-clause joins")
+    public OptimizerConfig setJoinMultiClauseIndependenceFactor(double joinMultiClauseIndependenceFactor)
+    {
+        this.joinMultiClauseIndependenceFactor = joinMultiClauseIndependenceFactor;
         return this;
     }
 
@@ -251,6 +273,21 @@ public class OptimizerConfig
     public OptimizerConfig setDefaultFilterFactorEnabled(boolean defaultFilterFactorEnabled)
     {
         this.defaultFilterFactorEnabled = defaultFilterFactorEnabled;
+        return this;
+    }
+
+    @Min(0)
+    @Max(1)
+    public double getFilterConjunctionIndependenceFactor()
+    {
+        return filterConjunctionIndependenceFactor;
+    }
+
+    @Config("optimizer.filter-conjunction-independence-factor")
+    @ConfigDescription("Scales the strength of independence assumption for selectivity estimates of the conjunction of multiple filters")
+    public OptimizerConfig setFilterConjunctionIndependenceFactor(double filterConjunctionIndependenceFactor)
+    {
+        this.filterConjunctionIndependenceFactor = filterConjunctionIndependenceFactor;
         return this;
     }
 
@@ -622,6 +659,44 @@ public class OptimizerConfig
     public OptimizerConfig setForceSingleNodeOutput(boolean value)
     {
         this.forceSingleNodeOutput = value;
+        return this;
+    }
+
+    public boolean isAdaptivePartialAggregationEnabled()
+    {
+        return adaptivePartialAggregationEnabled;
+    }
+
+    @Config("adaptive-partial-aggregation.enabled")
+    public OptimizerConfig setAdaptivePartialAggregationEnabled(boolean adaptivePartialAggregationEnabled)
+    {
+        this.adaptivePartialAggregationEnabled = adaptivePartialAggregationEnabled;
+        return this;
+    }
+
+    public long getAdaptivePartialAggregationMinRows()
+    {
+        return adaptivePartialAggregationMinRows;
+    }
+
+    @Config("adaptive-partial-aggregation.min-rows")
+    @ConfigDescription("Minimum number of processed rows before partial aggregation might be adaptively turned off")
+    public OptimizerConfig setAdaptivePartialAggregationMinRows(long adaptivePartialAggregationMinRows)
+    {
+        this.adaptivePartialAggregationMinRows = adaptivePartialAggregationMinRows;
+        return this;
+    }
+
+    public double getAdaptivePartialAggregationUniqueRowsRatioThreshold()
+    {
+        return adaptivePartialAggregationUniqueRowsRatioThreshold;
+    }
+
+    @Config("adaptive-partial-aggregation.unique-rows-ratio-threshold")
+    @ConfigDescription("Ratio between aggregation output and input rows above which partial aggregation might be adaptively turned off")
+    public OptimizerConfig setAdaptivePartialAggregationUniqueRowsRatioThreshold(double adaptivePartialAggregationUniqueRowsRatioThreshold)
+    {
+        this.adaptivePartialAggregationUniqueRowsRatioThreshold = adaptivePartialAggregationUniqueRowsRatioThreshold;
         return this;
     }
 }

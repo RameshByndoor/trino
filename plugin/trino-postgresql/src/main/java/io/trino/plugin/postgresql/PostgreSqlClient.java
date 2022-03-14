@@ -62,7 +62,11 @@ import io.trino.plugin.jdbc.aggregation.ImplementStddevSamp;
 import io.trino.plugin.jdbc.aggregation.ImplementSum;
 import io.trino.plugin.jdbc.aggregation.ImplementVariancePop;
 import io.trino.plugin.jdbc.aggregation.ImplementVarianceSamp;
+import io.trino.plugin.jdbc.expression.RewriteComparison;
+import io.trino.plugin.jdbc.expression.RewriteExactNumericConstant;
 import io.trino.plugin.jdbc.expression.RewriteLike;
+import io.trino.plugin.jdbc.expression.RewriteLikeWithEscape;
+import io.trino.plugin.jdbc.expression.RewriteOr;
 import io.trino.plugin.jdbc.expression.RewriteVarcharConstant;
 import io.trino.plugin.jdbc.expression.RewriteVariable;
 import io.trino.plugin.jdbc.mapping.IdentifierMapping;
@@ -307,7 +311,12 @@ public class PostgreSqlClient
         connectorExpressionRewriter = new ConnectorExpressionRewriter<>(this::quoted, ImmutableSet.of(
                 new RewriteVariable(),
                 new RewriteVarcharConstant(),
-                new RewriteLike()));
+                new RewriteExactNumericConstant(),
+                new RewriteOr(),
+                // TODO allow all comparison operators for numeric types
+                new RewriteComparison(RewriteComparison.ComparisonOperator.EQUAL, RewriteComparison.ComparisonOperator.NOT_EQUAL),
+                new RewriteLike(),
+                new RewriteLikeWithEscape()));
     }
 
     @Override

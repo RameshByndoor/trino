@@ -25,17 +25,12 @@ import com.google.common.util.concurrent.UncheckedExecutionException;
 import io.airlift.slice.Slice;
 import io.trino.FeaturesConfig;
 import io.trino.Session;
-import io.trino.client.NodeVersion;
 import io.trino.collect.cache.NonEvictableCache;
 import io.trino.connector.CatalogName;
 import io.trino.metadata.Catalog.SecurityManagement;
 import io.trino.metadata.ResolvedFunction.ResolvedFunctionDecoder;
-import io.trino.operator.aggregation.AggregationMetadata;
-import io.trino.operator.window.WindowFunctionSupplier;
 import io.trino.spi.QueryId;
 import io.trino.spi.TrinoException;
-import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockEncodingSerde;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.AggregationApplicationResult;
 import io.trino.spi.connector.Assignment;
@@ -80,8 +75,6 @@ import io.trino.spi.connector.TableScanRedirectApplicationResult;
 import io.trino.spi.connector.TopNApplicationResult;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Variable;
-import io.trino.spi.function.InvocationConvention;
-import io.trino.spi.function.InvocationConvention.InvocationArgumentConvention;
 import io.trino.spi.function.OperatorType;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.security.GrantInfo;
@@ -103,13 +96,10 @@ import io.trino.sql.planner.PartitioningHandle;
 import io.trino.sql.tree.QualifiedName;
 import io.trino.transaction.TransactionManager;
 import io.trino.type.BlockTypeOperators;
-import io.trino.type.InternalTypeManager;
 
 import javax.annotation.concurrent.GuardedBy;
 import javax.inject.Inject;
 
-import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodType;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -137,10 +127,10 @@ import static com.google.common.base.Verify.verifyNotNull;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
-import static com.google.common.primitives.Primitives.wrap;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.concurrent.MoreFutures.toListenableFuture;
 import static io.trino.SystemSessionProperties.getRetryPolicy;
+import static io.trino.client.NodeVersion.UNKNOWN;
 import static io.trino.collect.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.metadata.FunctionKind.AGGREGATE;
 import static io.trino.metadata.QualifiedObjectName.convertFromSchemaTableName;
@@ -148,7 +138,6 @@ import static io.trino.metadata.RedirectionAwareTableHandle.noRedirection;
 import static io.trino.metadata.RedirectionAwareTableHandle.withRedirectionTo;
 import static io.trino.metadata.Signature.mangleOperatorName;
 import static io.trino.metadata.SignatureBinder.applyBoundVariables;
-import static io.trino.spi.StandardErrorCode.FUNCTION_IMPLEMENTATION_ERROR;
 import static io.trino.spi.StandardErrorCode.FUNCTION_IMPLEMENTATION_MISSING;
 import static io.trino.spi.StandardErrorCode.FUNCTION_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.INVALID_VIEW;
@@ -159,6 +148,7 @@ import static io.trino.spi.StandardErrorCode.TABLE_REDIRECTION_ERROR;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypeSignatures;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static io.trino.transaction.InMemoryTransactionManager.createTestTransactionManager;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.lang.String.format;
 import static java.util.Collections.nCopies;
 import static java.util.Collections.singletonList;
@@ -171,7 +161,7 @@ public final class MetadataManager
     @VisibleForTesting
     public static final int MAX_TABLE_REDIRECTIONS = 10;
 
-    private final FunctionRegistry functions;
+    private final GlobalFunctionCatalog functions;
     private final FunctionResolver functionResolver;
     private final SystemSecurityMetadata systemSecurityMetadata;
     private final TransactionManager transactionManager;
@@ -189,15 +179,11 @@ public final class MetadataManager
             FeaturesConfig featuresConfig,
             SystemSecurityMetadata systemSecurityMetadata,
             TransactionManager transactionManager,
-            TypeOperators typeOperators,
-            BlockTypeOperators blockTypeOperators,
-            TypeManager typeManager,
-            BlockEncodingSerde blockEncodingSerde,
-            NodeVersion nodeVersion)
+            GlobalFunctionCatalog globalFunctionCatalog,
+            TypeManager typeManager)
     {
-        requireNonNull(nodeVersion, "nodeVersion is null");
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
-        functions = new FunctionRegistry(blockEncodingSerde, featuresConfig, typeOperators, blockTypeOperators, nodeVersion.getVersion());
+        functions = requireNonNull(globalFunctionCatalog, "globalFunctionCatalog is null");
         functionResolver = new FunctionResolver(this, typeManager);
 
         this.systemSecurityMetadata = requireNonNull(systemSecurityMetadata, "systemSecurityMetadata is null");
@@ -207,42 +193,6 @@ public final class MetadataManager
 
         operatorCache = buildNonEvictableCache(CacheBuilder.newBuilder().maximumSize(1000));
         coercionCache = buildNonEvictableCache(CacheBuilder.newBuilder().maximumSize(1000));
-    }
-
-    public static MetadataManager createTestMetadataManager()
-    {
-        return createTestMetadataManager(new FeaturesConfig());
-    }
-
-    public static MetadataManager createTestMetadataManager(FeaturesConfig featuresConfig)
-    {
-        return createTestMetadataManager(new CatalogManager(), featuresConfig);
-    }
-
-    public static MetadataManager createTestMetadataManager(CatalogManager catalogManager)
-    {
-        return createTestMetadataManager(catalogManager, new FeaturesConfig());
-    }
-
-    public static MetadataManager createTestMetadataManager(CatalogManager catalogManager, FeaturesConfig featuresConfig)
-    {
-        return createTestMetadataManager(createTestTransactionManager(catalogManager), featuresConfig);
-    }
-
-    public static MetadataManager createTestMetadataManager(TransactionManager transactionManager, FeaturesConfig featuresConfig)
-    {
-        TypeOperators typeOperators = new TypeOperators();
-        TypeRegistry typeRegistry = new TypeRegistry(typeOperators, featuresConfig);
-        TypeManager typeManager = new InternalTypeManager(typeRegistry);
-        return new MetadataManager(
-                featuresConfig,
-                new DisabledSystemSecurityMetadata(),
-                transactionManager,
-                typeOperators,
-                new BlockTypeOperators(typeOperators),
-                typeManager,
-                new InternalBlockEncodingSerde(new BlockEncodingManager(), typeManager),
-                NodeVersion.UNKNOWN);
     }
 
     @Override
@@ -2053,15 +2003,9 @@ public final class MetadataManager
     //
 
     @Override
-    public void addFunctions(List<? extends SqlFunction> functionInfos)
+    public Collection<FunctionMetadata> listFunctions()
     {
-        functions.addFunctions(functionInfos);
-    }
-
-    @Override
-    public List<FunctionMetadata> listFunctions()
-    {
-        return functions.list();
+        return functions.listFunctions();
     }
 
     @Override
@@ -2106,7 +2050,7 @@ public final class MetadataManager
     private ResolvedFunction resolvedFunctionInternal(Session session, QualifiedName name, List<TypeSignatureProvider> parameterTypes)
     {
         return functionDecoder.fromQualifiedName(name)
-                .orElseGet(() -> resolve(session, functionResolver.resolveFunction(session, functions.get(name), name, parameterTypes)));
+                .orElseGet(() -> resolve(session, functionResolver.resolveFunction(session, functions.getFunctions(name), name, parameterTypes)));
     }
 
     @Override
@@ -2117,8 +2061,10 @@ public final class MetadataManager
             // todo we should not be caching functions across session
             return coercionCache.get(new CoercionCacheKey(operatorType, fromType, toType), () -> {
                 String name = mangleOperatorName(operatorType);
-                Signature signature = new Signature(name, toType.getTypeSignature(), ImmutableList.of(fromType.getTypeSignature()));
-                FunctionBinding functionBinding = functionResolver.resolveCoercion(session, functions.get(QualifiedName.of(name)), signature);
+                FunctionBinding functionBinding = functionResolver.resolveCoercion(
+                        session,
+                        functions.getFunctions(QualifiedName.of(name)),
+                        new Signature(name, toType.getTypeSignature(), ImmutableList.of(fromType.getTypeSignature())));
                 return resolve(session, functionBinding);
             });
         }
@@ -2142,15 +2088,15 @@ public final class MetadataManager
     {
         FunctionBinding functionBinding = functionResolver.resolveCoercion(
                 session,
-                functions.get(name),
+                functions.getFunctions(name),
                 new Signature(name.getSuffix(), toType.getTypeSignature(), ImmutableList.of(fromType.getTypeSignature())));
         return resolve(session, functionBinding);
     }
 
     private ResolvedFunction resolve(Session session, FunctionBinding functionBinding)
     {
+        FunctionDependencyDeclaration declaration = functions.getFunctionDependencies(functionBinding.getFunctionId(), functionBinding.getBoundSignature());
         FunctionMetadata functionMetadata = getFunctionMetadata(functionBinding.getFunctionId(), functionBinding.getBoundSignature());
-        FunctionDependencyDeclaration declaration = functions.getFunctionDependencies(functionBinding);
         return resolve(session, functionBinding, functionMetadata, declaration);
     }
 
@@ -2224,7 +2170,7 @@ public final class MetadataManager
     @Override
     public boolean isAggregationFunction(QualifiedName name)
     {
-        return functions.get(name).stream()
+        return functions.getFunctions(name).stream()
                 .map(FunctionMetadata::getKind)
                 .anyMatch(AGGREGATE::equals);
     }
@@ -2237,7 +2183,7 @@ public final class MetadataManager
 
     private FunctionMetadata getFunctionMetadata(FunctionId functionId, BoundSignature signature)
     {
-        FunctionMetadata functionMetadata = functions.get(functionId);
+        FunctionMetadata functionMetadata = functions.getFunctionMetadata(functionId);
 
         // specialize function metadata to resolvedFunction
         List<Boolean> argumentNullability = functionMetadata.getFunctionNullability().getArgumentNullable();
@@ -2276,122 +2222,9 @@ public final class MetadataManager
         return new AggregationFunctionMetadata(aggregationFunctionMetadata.isOrderSensitive(), intermediateTypes);
     }
 
-    @Override
-    public WindowFunctionSupplier getWindowFunctionImplementation(ResolvedFunction resolvedFunction)
-    {
-        FunctionDependencies functionDependencies = new FunctionDependencies(this, resolvedFunction.getTypeDependencies(), resolvedFunction.getFunctionDependencies());
-        return functions.getWindowFunctionImplementation(resolvedFunction.getFunctionId(), resolvedFunction.getSignature(), functionDependencies);
-    }
-
-    @Override
-    public AggregationMetadata getAggregateFunctionImplementation(ResolvedFunction resolvedFunction)
-    {
-        FunctionDependencies functionDependencies = new FunctionDependencies(this, resolvedFunction.getTypeDependencies(), resolvedFunction.getFunctionDependencies());
-        return functions.getAggregateFunctionImplementation(resolvedFunction.getFunctionId(), resolvedFunction.getSignature(), functionDependencies);
-    }
-
-    @Override
-    public FunctionInvoker getScalarFunctionInvoker(ResolvedFunction resolvedFunction, InvocationConvention invocationConvention)
-    {
-        FunctionDependencies functionDependencies = new FunctionDependencies(this, resolvedFunction.getTypeDependencies(), resolvedFunction.getFunctionDependencies());
-        FunctionInvoker functionInvoker = functions.getScalarFunctionInvoker(resolvedFunction.getFunctionId(), resolvedFunction.getSignature(), functionDependencies, invocationConvention);
-        verifyMethodHandleSignature(resolvedFunction.getSignature(), functionInvoker, invocationConvention);
-        return functionInvoker;
-    }
-
-    private static void verifyMethodHandleSignature(BoundSignature boundSignature, FunctionInvoker functionInvoker, InvocationConvention convention)
-    {
-        MethodHandle methodHandle = functionInvoker.getMethodHandle();
-        MethodType methodType = methodHandle.type();
-
-        checkArgument(convention.getArgumentConventions().size() == boundSignature.getArgumentTypes().size(),
-                "Expected %s arguments, but got %s", boundSignature.getArgumentTypes().size(), convention.getArgumentConventions().size());
-
-        int expectedParameterCount = convention.getArgumentConventions().stream()
-                .mapToInt(InvocationArgumentConvention::getParameterCount)
-                .sum();
-        expectedParameterCount += methodType.parameterList().stream().filter(ConnectorSession.class::equals).count();
-        if (functionInvoker.getInstanceFactory().isPresent()) {
-            expectedParameterCount++;
-        }
-        checkArgument(expectedParameterCount == methodType.parameterCount(),
-                "Expected %s method parameters, but got %s", expectedParameterCount, methodType.parameterCount());
-
-        int parameterIndex = 0;
-        if (functionInvoker.getInstanceFactory().isPresent()) {
-            verifyFunctionSignature(convention.supportsInstanceFactor(), "Method requires instance factory, but calling convention does not support an instance factory");
-            MethodHandle factoryMethod = functionInvoker.getInstanceFactory().orElseThrow();
-            verifyFunctionSignature(methodType.parameterType(parameterIndex).equals(factoryMethod.type().returnType()), "Invalid return type");
-            parameterIndex++;
-        }
-
-        int lambdaArgumentIndex = 0;
-        for (int argumentIndex = 0; argumentIndex < boundSignature.getArgumentTypes().size(); argumentIndex++) {
-            // skip session parameters
-            while (methodType.parameterType(parameterIndex).equals(ConnectorSession.class)) {
-                verifyFunctionSignature(convention.supportsSession(), "Method requires session, but calling convention does not support session");
-                parameterIndex++;
-            }
-
-            Class<?> parameterType = methodType.parameterType(parameterIndex);
-            Type argumentType = boundSignature.getArgumentTypes().get(argumentIndex);
-            InvocationArgumentConvention argumentConvention = convention.getArgumentConvention(argumentIndex);
-            switch (argumentConvention) {
-                case NEVER_NULL:
-                    verifyFunctionSignature(parameterType.isAssignableFrom(argumentType.getJavaType()),
-                            "Expected argument type to be %s, but is %s", argumentType, parameterType);
-                    break;
-                case NULL_FLAG:
-                    verifyFunctionSignature(parameterType.isAssignableFrom(argumentType.getJavaType()),
-                            "Expected argument type to be %s, but is %s", argumentType.getJavaType(), parameterType);
-                    verifyFunctionSignature(methodType.parameterType(parameterIndex + 1).equals(boolean.class),
-                            "Expected null flag parameter to be followed by a boolean parameter");
-                    break;
-                case BOXED_NULLABLE:
-                    verifyFunctionSignature(parameterType.isAssignableFrom(wrap(argumentType.getJavaType())),
-                            "Expected argument type to be %s, but is %s", wrap(argumentType.getJavaType()), parameterType);
-                    break;
-                case BLOCK_POSITION:
-                    verifyFunctionSignature(parameterType.equals(Block.class) && methodType.parameterType(parameterIndex + 1).equals(int.class),
-                            "Expected BLOCK_POSITION argument have parameters Block and int");
-                    break;
-                case FUNCTION:
-                    Class<?> lambdaInterface = functionInvoker.getLambdaInterfaces().get(lambdaArgumentIndex);
-                    verifyFunctionSignature(parameterType.equals(lambdaInterface),
-                            "Expected function interface to be %s, but is %s", lambdaInterface, parameterType);
-                    lambdaArgumentIndex++;
-                    break;
-                default:
-                    throw new UnsupportedOperationException("Unknown argument convention: " + argumentConvention);
-            }
-            parameterIndex += argumentConvention.getParameterCount();
-        }
-
-        Type returnType = boundSignature.getReturnType();
-        switch (convention.getReturnConvention()) {
-            case FAIL_ON_NULL:
-                verifyFunctionSignature(methodType.returnType().isAssignableFrom(returnType.getJavaType()),
-                        "Expected return type to be %s, but is %s", returnType.getJavaType(), methodType.returnType());
-                break;
-            case NULLABLE_RETURN:
-                verifyFunctionSignature(methodType.returnType().isAssignableFrom(wrap(returnType.getJavaType())),
-                        "Expected return type to be %s, but is %s", returnType.getJavaType(), wrap(methodType.returnType()));
-                break;
-            default:
-                throw new UnsupportedOperationException("Unknown return convention: " + convention.getReturnConvention());
-        }
-    }
-
-    private static void verifyFunctionSignature(boolean check, String message, Object... args)
-    {
-        if (!check) {
-            throw new TrinoException(FUNCTION_IMPLEMENTATION_ERROR, format(message, args));
-        }
-    }
-
     private FunctionBinding toFunctionBinding(ResolvedFunction resolvedFunction)
     {
-        Signature functionSignature = functions.get(resolvedFunction.getFunctionId()).getSignature();
+        Signature functionSignature = functions.getFunctionMetadata(resolvedFunction.getFunctionId()).getSignature();
         return toFunctionBinding(resolvedFunction.getFunctionId(), resolvedFunction.getSignature(), functionSignature);
     }
 
@@ -2623,6 +2456,84 @@ public final class MetadataManager
             return Objects.equals(this.operatorType, other.operatorType) &&
                     Objects.equals(this.fromType, other.fromType) &&
                     Objects.equals(this.toType, other.toType);
+        }
+    }
+
+    public static MetadataManager createTestMetadataManager()
+    {
+        return testMetadataManagerBuilder().build();
+    }
+
+    public static TestMetadataManagerBuilder testMetadataManagerBuilder()
+    {
+        return new TestMetadataManagerBuilder();
+    }
+
+    public static class TestMetadataManagerBuilder
+    {
+        private FeaturesConfig featuresConfig;
+        private TransactionManager transactionManager;
+        private TypeManager typeManager = TESTING_TYPE_MANAGER;
+        private GlobalFunctionCatalog globalFunctionCatalog;
+
+        private TestMetadataManagerBuilder() {}
+
+        public TestMetadataManagerBuilder withCatalogManager(CatalogManager catalogManager)
+        {
+            this.transactionManager = createTestTransactionManager(catalogManager);
+            return this;
+        }
+
+        public TestMetadataManagerBuilder withFeaturesConfig(FeaturesConfig featuresConfig)
+        {
+            this.featuresConfig = featuresConfig;
+            return this;
+        }
+
+        public TestMetadataManagerBuilder withTransactionManager(TransactionManager transactionManager)
+        {
+            this.transactionManager = transactionManager;
+            return this;
+        }
+
+        public TestMetadataManagerBuilder withTypeManager(TypeManager typeManager)
+        {
+            this.typeManager = requireNonNull(typeManager, "typeManager is null");
+            return this;
+        }
+
+        public TestMetadataManagerBuilder withGlobalFunctionCatalog(GlobalFunctionCatalog globalFunctionCatalog)
+        {
+            this.globalFunctionCatalog = globalFunctionCatalog;
+            return this;
+        }
+
+        public MetadataManager build()
+        {
+            FeaturesConfig featuresConfig = this.featuresConfig;
+            if (featuresConfig == null) {
+                featuresConfig = new FeaturesConfig();
+            }
+
+            TransactionManager transactionManager = this.transactionManager;
+            if (transactionManager == null) {
+                transactionManager = createTestTransactionManager();
+            }
+
+            GlobalFunctionCatalog globalFunctionCatalog = this.globalFunctionCatalog;
+            if (globalFunctionCatalog == null) {
+                globalFunctionCatalog = new GlobalFunctionCatalog();
+                TypeOperators typeOperators = new TypeOperators();
+                globalFunctionCatalog.addFunctions(SystemFunctionBundle.create(featuresConfig, typeOperators, new BlockTypeOperators(typeOperators), UNKNOWN));
+                globalFunctionCatalog.addFunctions(new InternalFunctionBundle(new LiteralFunction(new InternalBlockEncodingSerde(new BlockEncodingManager(), typeManager))));
+            }
+
+            return new MetadataManager(
+                    featuresConfig,
+                    new DisabledSystemSecurityMetadata(),
+                    transactionManager,
+                    globalFunctionCatalog,
+                    typeManager);
         }
     }
 }

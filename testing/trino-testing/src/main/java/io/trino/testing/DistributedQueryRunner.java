@@ -29,11 +29,12 @@ import io.trino.execution.FailureInjector.InjectedFailureType;
 import io.trino.execution.QueryManager;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.AllNodes;
+import io.trino.metadata.FunctionBundle;
+import io.trino.metadata.FunctionManager;
 import io.trino.metadata.InternalNode;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.QualifiedObjectName;
 import io.trino.metadata.SessionPropertyManager;
-import io.trino.metadata.SqlFunction;
 import io.trino.server.BasicQueryInfo;
 import io.trino.server.SessionPropertyDefaults;
 import io.trino.server.testing.TestingTrinoServer;
@@ -198,7 +199,7 @@ public class DistributedQueryRunner
 
         long start = System.nanoTime();
         for (TestingTrinoServer server : servers) {
-            server.getMetadata().addFunctions(AbstractTestQueries.CUSTOM_FUNCTIONS);
+            server.addFunctions(AbstractTestQueries.CUSTOM_FUNCTIONS);
         }
         log.info("Added functions in %s", nanosSince(start).convertToMostSuccinctTimeUnit());
     }
@@ -272,7 +273,7 @@ public class DistributedQueryRunner
                     ImmutableList.of()));
             serverBuilder.add(server);
             // add functions
-            server.getMetadata().addFunctions(AbstractTestQueries.CUSTOM_FUNCTIONS);
+            server.addFunctions(AbstractTestQueries.CUSTOM_FUNCTIONS);
         }
         servers = serverBuilder.build();
         waitForAllNodesGloballyVisible();
@@ -349,6 +350,12 @@ public class DistributedQueryRunner
     }
 
     @Override
+    public FunctionManager getFunctionManager()
+    {
+        return coordinator.getFunctionManager();
+    }
+
+    @Override
     public SplitManager getSplitManager()
     {
         return coordinator.getSplitManager();
@@ -415,9 +422,9 @@ public class DistributedQueryRunner
     }
 
     @Override
-    public void addFunctions(List<? extends SqlFunction> functions)
+    public void addFunctions(FunctionBundle functionBundle)
     {
-        servers.forEach(server -> server.getMetadata().addFunctions(functions));
+        servers.forEach(server -> server.addFunctions(functionBundle));
     }
 
     public void createCatalog(String catalogName, String connectorName)

@@ -353,6 +353,26 @@ public class TestHiveRedirectionToIceberg
     }
 
     @Test(groups = {HIVE_ICEBERG_REDIRECTIONS, PROFILE_SPECIFIC_TESTS})
+    public void testAlterTableRenameColumn()
+    {
+        String tableName = "iceberg_alter_table_" + randomTableSuffix();
+        String hiveTableName = "hive.default." + tableName;
+        String icebergTableName = "iceberg.default." + tableName;
+
+        createIcebergTable(icebergTableName, false);
+
+        onTrino().executeQuery("ALTER TABLE " + hiveTableName + " RENAME COLUMN nationkey TO nation_key");
+
+        Assertions.assertThat(onTrino().executeQuery("DESCRIBE " + icebergTableName).column(1))
+                .containsOnly("nation_key", "name", "regionkey", "comment");
+
+        assertResultsEqual(
+                onTrino().executeQuery("TABLE " + icebergTableName),
+                onTrino().executeQuery("SELECT nationkey as nation_key, name, regionkey, comment FROM tpch.tiny.nation"));
+        onTrino().executeQuery("DROP TABLE " + icebergTableName);
+    }
+
+    @Test(groups = {HIVE_ICEBERG_REDIRECTIONS, PROFILE_SPECIFIC_TESTS})
     public void testCommentTable()
     {
         String tableName = "iceberg_comment_table_" + randomTableSuffix();
@@ -390,6 +410,20 @@ public class TestHiveRedirectionToIceberg
 
         assertColumnComment("hive", "default", tableName, columnName).isEqualTo(columnComment);
         assertColumnComment("iceberg", "default", tableName, columnName).isEqualTo(columnComment);
+
+        onTrino().executeQuery("DROP TABLE " + icebergTableName);
+    }
+
+    @Test(groups = {HIVE_ICEBERG_REDIRECTIONS, PROFILE_SPECIFIC_TESTS})
+    public void testShowGrants()
+    {
+        String tableName = "iceberg_show_grants_" + randomTableSuffix();
+        String hiveTableName = "hive.default." + tableName;
+        String icebergTableName = "iceberg.default." + tableName;
+        createIcebergTable(icebergTableName, false);
+
+        assertQueryFailure(() -> onTrino().executeQuery(format("SHOW GRANTS ON %s", hiveTableName)))
+                .hasMessageMatching("\\QQuery failed (#\\E\\S+\\Q): line 1:1: Table " + hiveTableName + " is redirected to " + icebergTableName + " and SHOW GRANTS is not supported with table redirections");
 
         onTrino().executeQuery("DROP TABLE " + icebergTableName);
     }

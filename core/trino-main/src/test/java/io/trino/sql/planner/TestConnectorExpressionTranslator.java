@@ -22,10 +22,13 @@ import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Constant;
 import io.trino.spi.expression.FieldDereference;
 import io.trino.spi.expression.FunctionName;
+import io.trino.spi.expression.StandardFunctions;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.type.Type;
+import io.trino.sql.tree.ComparisonExpression;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.LikePredicate;
+import io.trino.sql.tree.LogicalExpression;
 import io.trino.sql.tree.LongLiteral;
 import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.StringLiteral;
@@ -33,23 +36,32 @@ import io.trino.sql.tree.SubscriptExpression;
 import io.trino.sql.tree.SymbolReference;
 import io.trino.testing.TestingSession;
 import io.trino.transaction.TestingTransactionManager;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.spi.expression.StandardFunctions.LIKE_PATTERN_FUNCTION_NAME;
+import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.RowType.field;
 import static io.trino.spi.type.RowType.rowType;
+import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarcharType.createVarcharType;
 import static io.trino.sql.planner.ConnectorExpressionTranslator.translate;
 import static io.trino.sql.planner.TestingPlannerContext.PLANNER_CONTEXT;
 import static io.trino.sql.planner.TypeAnalyzer.createTestingTypeAnalyzer;
+import static io.trino.testing.DataProviders.toDataProvider;
 import static io.trino.transaction.TransactionBuilder.transaction;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.testng.Assert.assertEquals;
@@ -64,6 +76,7 @@ public class TestConnectorExpressionTranslator
 
     private static final Map<Symbol, Type> symbols = ImmutableMap.<Symbol, Type>builder()
             .put(new Symbol("double_symbol_1"), DOUBLE)
+            .put(new Symbol("double_symbol_2"), DOUBLE)
             .put(new Symbol("row_symbol_1"), ROW_TYPE)
             .put(new Symbol("varchar_symbol_1"), VARCHAR_TYPE)
             .buildOrThrow();
@@ -73,79 +86,152 @@ public class TestConnectorExpressionTranslator
             .collect(toImmutableMap(entry -> entry.getKey().getName(), Map.Entry::getKey));
 
     @Test
-    public void testTranslationToConnectorExpression()
+    public void testTranslateConstant()
     {
-        assertTranslationToConnectorExpression(TEST_SESSION, new SymbolReference("double_symbol_1"), Optional.of(new Variable("double_symbol_1", DOUBLE)));
+        testTranslateConstant(true, BOOLEAN);
 
-        assertTranslationToConnectorExpression(
-                TEST_SESSION,
+        testTranslateConstant(42L, TINYINT);
+        testTranslateConstant(42L, SMALLINT);
+        testTranslateConstant(42L, INTEGER);
+        testTranslateConstant(42L, BIGINT);
+
+        testTranslateConstant(42L, REAL);
+        testTranslateConstant(42d, DOUBLE);
+
+        testTranslateConstant(4200L, createDecimalType(4, 2));
+        testTranslateConstant(4200L, createDecimalType(8, 2));
+
+        testTranslateConstant(utf8Slice("abc"), createVarcharType(3));
+        testTranslateConstant(utf8Slice("abc"), createVarcharType(33));
+    }
+
+    private void testTranslateConstant(Object nativeValue, Type type)
+    {
+        assertTranslationRoundTrips(LITERAL_ENCODER.toExpression(TEST_SESSION, nativeValue, type), new Constant(nativeValue, type));
+    }
+
+    @Test
+    public void testTranslateSymbol()
+    {
+        assertTranslationRoundTrips(new SymbolReference("double_symbol_1"), new Variable("double_symbol_1", DOUBLE));
+    }
+
+    @Test
+    public void testTranslateRowSubscript()
+    {
+        assertTranslationRoundTrips(
                 new SubscriptExpression(
                         new SymbolReference("row_symbol_1"),
                         new LongLiteral("1")),
-                Optional.of(
-                        new FieldDereference(
-                                INTEGER,
-                                new Variable("row_symbol_1", ROW_TYPE),
-                                0)));
+                new FieldDereference(
+                        INTEGER,
+                        new Variable("row_symbol_1", ROW_TYPE),
+                        0));
+    }
 
+    @Test(dataProvider = "testTranslateLogicalExpressionDataProvider")
+    public void testTranslateLogicalExpression(LogicalExpression.Operator operator)
+    {
+        assertTranslationRoundTrips(
+                new LogicalExpression(
+                        operator,
+                        List.of(
+                                new ComparisonExpression(ComparisonExpression.Operator.LESS_THAN, new SymbolReference("double_symbol_1"), new SymbolReference("double_symbol_2")),
+                                new ComparisonExpression(ComparisonExpression.Operator.EQUAL, new SymbolReference("double_symbol_1"), new SymbolReference("double_symbol_2")))),
+                new Call(
+                        BOOLEAN,
+                        operator == LogicalExpression.Operator.AND ? StandardFunctions.AND_FUNCTION_NAME : StandardFunctions.OR_FUNCTION_NAME,
+                        List.of(
+                                new Call(
+                                        BOOLEAN,
+                                        StandardFunctions.LESS_THAN_OPERATOR_FUNCTION_NAME,
+                                        List.of(new Variable("double_symbol_1", DOUBLE), new Variable("double_symbol_2", DOUBLE))),
+                                new Call(
+                                        BOOLEAN,
+                                        StandardFunctions.EQUAL_OPERATOR_FUNCTION_NAME,
+                                        List.of(new Variable("double_symbol_1", DOUBLE), new Variable("double_symbol_2", DOUBLE))))));
+    }
+
+    @DataProvider
+    public Object[][] testTranslateLogicalExpressionDataProvider()
+    {
+        return Stream.of(LogicalExpression.Operator.values())
+                .collect(toDataProvider());
+    }
+
+    @Test(dataProvider = "testTranslateComparisonExpressionDataProvider")
+    public void testTranslateComparisonExpression(ComparisonExpression.Operator operator)
+    {
+        assertTranslationRoundTrips(
+                new ComparisonExpression(operator, new SymbolReference("double_symbol_1"), new SymbolReference("double_symbol_2")),
+                new Call(
+                        BOOLEAN,
+                        ConnectorExpressionTranslator.functionNameForComparisonOperator(operator),
+                        List.of(new Variable("double_symbol_1", DOUBLE), new Variable("double_symbol_2", DOUBLE))));
+    }
+
+    @DataProvider
+    public static Object[][] testTranslateComparisonExpressionDataProvider()
+    {
+        return Stream.of(ComparisonExpression.Operator.values())
+                .collect(toDataProvider());
+    }
+
+    @Test
+    public void testTranslateLike()
+    {
         String pattern = "%pattern%";
-        assertTranslationToConnectorExpression(
-                TEST_SESSION,
+        assertTranslationRoundTrips(
                 new LikePredicate(
                         new SymbolReference("varchar_symbol_1"),
                         new StringLiteral(pattern),
                         Optional.empty()),
-                Optional.of(new Call(BOOLEAN,
+                new Call(BOOLEAN,
                         LIKE_PATTERN_FUNCTION_NAME,
                         List.of(new Variable("varchar_symbol_1", VARCHAR_TYPE),
-                                new Constant(Slices.wrappedBuffer(pattern.getBytes(UTF_8)), createVarcharType(pattern.length()))))));
+                                new Constant(Slices.wrappedBuffer(pattern.getBytes(UTF_8)), createVarcharType(pattern.length())))));
 
+        String escape = "\\";
+        assertTranslationRoundTrips(
+                new LikePredicate(
+                        new SymbolReference("varchar_symbol_1"),
+                        new StringLiteral(pattern),
+                        Optional.of(new StringLiteral(escape))),
+                new Call(BOOLEAN,
+                        LIKE_PATTERN_FUNCTION_NAME,
+                        List.of(
+                                new Variable("varchar_symbol_1", VARCHAR_TYPE),
+                                new Constant(Slices.wrappedBuffer(pattern.getBytes(UTF_8)), createVarcharType(pattern.length())),
+                                new Constant(Slices.wrappedBuffer(escape.getBytes(UTF_8)), createVarcharType(escape.length())))));
+    }
+
+    @Test
+    public void testTranslateResolvedFunction()
+    {
         transaction(new TestingTransactionManager(), new AllowAllAccessControl())
                 .readOnly()
                 .execute(TEST_SESSION, transactionSession -> {
-                    assertTranslationToConnectorExpression(transactionSession,
+                    assertTranslationRoundTrips(
+                            transactionSession,
                             FunctionCallBuilder.resolve(TEST_SESSION, PLANNER_CONTEXT.getMetadata())
                                     .setName(QualifiedName.of(("lower")))
                                     .addArgument(VARCHAR_TYPE, new SymbolReference("varchar_symbol_1"))
                                     .build(),
-                            Optional.of(new Call(VARCHAR_TYPE,
+                            new Call(VARCHAR_TYPE,
                                     new FunctionName("lower"),
-                                    List.of(new Variable("varchar_symbol_1", VARCHAR_TYPE)))));
+                                    List.of(new Variable("varchar_symbol_1", VARCHAR_TYPE))));
                 });
     }
 
-    @Test
-    public void testTranslationFromConnectorExpression()
+    private void assertTranslationRoundTrips(Expression expression, ConnectorExpression connectorExpression)
     {
-        assertTranslationFromConnectorExpression(new Variable("double_symbol_1", DOUBLE), new SymbolReference("double_symbol_1"));
+        assertTranslationRoundTrips(TEST_SESSION, expression, connectorExpression);
+    }
 
-        assertTranslationFromConnectorExpression(
-                new FieldDereference(
-                        INTEGER,
-                        new Variable("row_symbol_1", ROW_TYPE),
-                        0),
-                new SubscriptExpression(
-                        new SymbolReference("row_symbol_1"),
-                        new LongLiteral("1")));
-
-        String pattern = "%pattern%";
-        assertTranslationFromConnectorExpression(
-                new Call(VARCHAR_TYPE,
-                        LIKE_PATTERN_FUNCTION_NAME,
-                        List.of(new Variable("varchar_symbol_1", VARCHAR_TYPE),
-                                new Constant(Slices.wrappedBuffer(pattern.getBytes(UTF_8)), createVarcharType(pattern.length())))),
-                new LikePredicate(new SymbolReference("varchar_symbol_1"),
-                        new StringLiteral(pattern),
-                        Optional.empty()));
-
-        assertTranslationFromConnectorExpression(
-                new Call(VARCHAR_TYPE,
-                        new FunctionName("lower"),
-                        List.of(new Variable("varchar_symbol_1", VARCHAR_TYPE))),
-                FunctionCallBuilder.resolve(TEST_SESSION, PLANNER_CONTEXT.getMetadata())
-                        .setName(QualifiedName.of(("lower")))
-                        .addArgument(VARCHAR_TYPE, new SymbolReference("varchar_symbol_1"))
-                        .build());
+    private void assertTranslationRoundTrips(Session session, Expression expression, ConnectorExpression connectorExpression)
+    {
+        assertTranslationToConnectorExpression(session, expression, Optional.of(connectorExpression));
+        assertTranslationFromConnectorExpression(session, connectorExpression, expression);
     }
 
     private void assertTranslationToConnectorExpression(Session session, Expression expression, Optional<ConnectorExpression> connectorExpression)
@@ -155,9 +241,9 @@ public class TestConnectorExpressionTranslator
         translation.ifPresent(value -> assertEquals(value, connectorExpression.get()));
     }
 
-    private void assertTranslationFromConnectorExpression(ConnectorExpression connectorExpression, Expression expected)
+    private void assertTranslationFromConnectorExpression(Session session, ConnectorExpression connectorExpression, Expression expected)
     {
-        Expression translation = ConnectorExpressionTranslator.translate(TEST_SESSION, connectorExpression, PLANNER_CONTEXT, variableMappings, LITERAL_ENCODER);
+        Expression translation = ConnectorExpressionTranslator.translate(session, connectorExpression, PLANNER_CONTEXT, variableMappings, LITERAL_ENCODER);
         assertEquals(translation, expected);
     }
 }
