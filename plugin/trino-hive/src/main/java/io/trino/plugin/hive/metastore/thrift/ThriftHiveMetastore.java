@@ -18,7 +18,6 @@ import com.google.common.cache.CacheLoader;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Iterables;
 import com.google.common.util.concurrent.UncheckedExecutionException;
 import io.airlift.log.Logger;
 import io.airlift.units.Duration;
@@ -37,6 +36,7 @@ import io.trino.plugin.hive.TableAlreadyExistsException;
 import io.trino.plugin.hive.acid.AcidOperation;
 import io.trino.plugin.hive.acid.AcidTransaction;
 import io.trino.plugin.hive.authentication.HiveIdentity;
+import io.trino.plugin.hive.metastore.AcidTransactionOwner;
 import io.trino.plugin.hive.metastore.Column;
 import io.trino.plugin.hive.metastore.HiveColumnStatistics;
 import io.trino.plugin.hive.metastore.HivePrincipal;
@@ -511,7 +511,7 @@ public class ThriftHiveMetastore
         }
     }
 
-    private Map<String, HiveColumnStatistics> groupStatisticsByColumn(List<ColumnStatisticsObj> statistics, OptionalLong rowCount)
+    private static Map<String, HiveColumnStatistics> groupStatisticsByColumn(List<ColumnStatisticsObj> statistics, OptionalLong rowCount)
     {
         return statistics.stream()
                 .collect(toImmutableMap(ColumnStatisticsObj::getColName, statisticsObj -> ThriftMetastoreUtil.fromMetastoreApiColumnStatistics(statisticsObj, rowCount)));
@@ -1575,15 +1575,15 @@ public class ThriftHiveMetastore
     }
 
     @Override
-    public long openTransaction(HiveIdentity identity)
+    public long openTransaction(HiveIdentity identity, AcidTransactionOwner transactionOwner)
     {
-        checkArgument(!identity.getUsername().map(String::isEmpty).orElse(true), "User should be provided to open transaction");
+        requireNonNull(transactionOwner, "transactionOwner is null");
         try {
             return retry()
                     .stopOnIllegalExceptions()
                     .run("openTransaction", stats.getOpenTransaction().wrap(() -> {
                         try (ThriftMetastoreClient metastoreClient = createMetastoreClient(identity)) {
-                            return metastoreClient.openTransaction(identity.getUsername().get());
+                            return metastoreClient.openTransaction(transactionOwner.toString());
                         }
                     }));
         }
@@ -1659,21 +1659,43 @@ public class ThriftHiveMetastore
     }
 
     @Override
-    public void acquireSharedReadLock(HiveIdentity identity, String queryId, long transactionId, List<SchemaTableName> fullTables, List<HivePartition> partitions)
+    public void acquireSharedReadLock(
+            HiveIdentity identity,
+            AcidTransactionOwner transactionOwner,
+            String queryId,
+            long transactionId,
+            List<SchemaTableName> fullTables,
+            List<HivePartition> partitions)
     {
-        acquireSharedLock(DataOperationType.SELECT, false, identity, queryId, transactionId, fullTables, partitions);
+        acquireSharedLock(identity, transactionOwner, queryId, transactionId, fullTables, partitions, DataOperationType.SELECT, false);
     }
 
     @Override
-    public void acquireTableWriteLock(HiveIdentity identity, String queryId, long transactionId, String dbName, String tableName, DataOperationType operation, boolean isDynamicPartitionWrite)
+    public void acquireTableWriteLock(
+            HiveIdentity identity,
+            AcidTransactionOwner transactionOwner,
+            String queryId,
+            long transactionId,
+            String dbName,
+            String tableName,
+            DataOperationType operation,
+            boolean isDynamicPartitionWrite)
     {
-        acquireSharedLock(operation, isDynamicPartitionWrite, identity, queryId, transactionId, ImmutableList.of(new SchemaTableName(dbName, tableName)), Collections.emptyList());
+        acquireSharedLock(identity, transactionOwner, queryId, transactionId, ImmutableList.of(new SchemaTableName(dbName, tableName)), Collections.emptyList(), operation, isDynamicPartitionWrite);
     }
 
-    private void acquireSharedLock(DataOperationType operation, boolean isDynamicPartitionWrite, HiveIdentity identity, String queryId, long transactionId, List<SchemaTableName> fullTables, List<HivePartition> partitions)
+    private void acquireSharedLock(
+            HiveIdentity identity,
+            AcidTransactionOwner transactionOwner,
+            String queryId,
+            long transactionId,
+            List<SchemaTableName> fullTables,
+            List<HivePartition> partitions,
+            DataOperationType operation,
+            boolean isDynamicPartitionWrite)
     {
         requireNonNull(operation, "operation is null");
-        checkArgument(!identity.getUsername().map(String::isEmpty).orElse(true), "User should be provided to acquire locks");
+        requireNonNull(transactionOwner, "transactionOwner is null");
         requireNonNull(queryId, "queryId is null");
 
         if (fullTables.isEmpty() && partitions.isEmpty()) {
@@ -1682,7 +1704,7 @@ public class ThriftHiveMetastore
 
         LockRequestBuilder request = new LockRequestBuilder(queryId)
                 .setTransactionId(transactionId)
-                .setUser(identity.getUsername().get());
+                .setUser(transactionOwner.toString());
 
         for (SchemaTableName table : fullTables) {
             request.addLockComponent(createLockComponentForOperation(table, operation, isDynamicPartitionWrite, Optional.empty()));
@@ -1696,13 +1718,19 @@ public class ThriftHiveMetastore
     }
 
     @Override
-    public long acquireTableExclusiveLock(HiveIdentity identity, String queryId, String dbName, String tableName)
+    public long acquireTableExclusiveLock(
+            HiveIdentity identity,
+            AcidTransactionOwner transactionOwner,
+            String queryId,
+            String dbName,
+            String tableName)
     {
+        requireNonNull(transactionOwner, "transactionOwner is null");
         LockComponent lockComponent = new LockComponent(LockType.EXCLUSIVE, LockLevel.TABLE, dbName);
         lockComponent.setTablename(tableName);
         LockRequest lockRequest = new LockRequestBuilder(queryId)
                 .addLockComponent(lockComponent)
-                .setUser(identity.getUsername().get())
+                .setUser(transactionOwner.toString())
                 .build();
         return acquireLock(identity, format("query %s", queryId), lockRequest);
     }
@@ -1861,7 +1889,7 @@ public class ThriftHiveMetastore
                     .run("allocateWriteId", stats.getAllocateWriteId().wrap(() -> {
                         try (ThriftMetastoreClient metastoreClient = createMetastoreClient(identity)) {
                             List<TxnToWriteId> list = metastoreClient.allocateTableWriteIds(dbName, tableName, ImmutableList.of(transactionId));
-                            return Iterables.getOnlyElement(list).getWriteId();
+                            return getOnlyElement(list).getWriteId();
                         }
                     }));
         }
@@ -1950,7 +1978,7 @@ public class ThriftHiveMetastore
         return impersonationEnabled;
     }
 
-    private PrivilegeBag buildPrivilegeBag(
+    private static PrivilegeBag buildPrivilegeBag(
             String databaseName,
             String tableName,
             HivePrincipal grantee,
@@ -1969,14 +1997,14 @@ public class ThriftHiveMetastore
         return new PrivilegeBag(privilegeBagBuilder.build());
     }
 
-    private boolean containsAllPrivilege(Set<PrivilegeGrantInfo> requestedPrivileges)
+    private static boolean containsAllPrivilege(Set<PrivilegeGrantInfo> requestedPrivileges)
     {
         return requestedPrivileges.stream()
                 .anyMatch(privilege -> privilege.getPrivilege().equalsIgnoreCase("all"));
     }
 
     @SafeVarargs
-    private final <T> T alternativeCall(
+    private static <T> T alternativeCall(
             ClientSupplier clientSupplier,
             Predicate<Exception> isValidExceptionalResponse,
             AtomicInteger chosenAlternative,
