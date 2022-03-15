@@ -21,7 +21,7 @@ import javax.annotation.Nullable;
 
 import java.util.Optional;
 import java.util.OptionalInt;
-import java.util.function.BiConsumer;
+import java.util.function.ObjLongConsumer;
 
 import static io.airlift.slice.SizeOf.sizeOf;
 import static io.trino.spi.block.BlockUtil.checkArrayRange;
@@ -42,7 +42,6 @@ public class Int96ArrayBlock
     private final long[] high;
     private final int[] low;
 
-    private final long sizeInBytes;
     private final long retainedSizeInBytes;
 
     public Int96ArrayBlock(int positionCount, Optional<boolean[]> valueIsNull, long[] high, int[] low)
@@ -76,7 +75,6 @@ public class Int96ArrayBlock
         }
         this.valueIsNull = valueIsNull;
 
-        sizeInBytes = SIZE_IN_BYTES_PER_POSITION * (long) positionCount;
         retainedSizeInBytes = INSTANCE_SIZE + sizeOf(valueIsNull) + sizeOf(high) + sizeOf(low);
     }
 
@@ -89,7 +87,7 @@ public class Int96ArrayBlock
     @Override
     public long getSizeInBytes()
     {
-        return sizeInBytes;
+        return SIZE_IN_BYTES_PER_POSITION * (long) positionCount;
     }
 
     @Override
@@ -117,7 +115,7 @@ public class Int96ArrayBlock
     }
 
     @Override
-    public void retainedBytesForEachPart(BiConsumer<Object, Long> consumer)
+    public void retainedBytesForEachPart(ObjLongConsumer<Object> consumer)
     {
         consumer.accept(high, sizeOf(high));
         consumer.accept(low, sizeOf(low));

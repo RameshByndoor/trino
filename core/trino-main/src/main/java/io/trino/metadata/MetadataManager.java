@@ -115,7 +115,6 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ExecutionException;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -131,6 +130,7 @@ import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.concurrent.MoreFutures.toListenableFuture;
 import static io.trino.SystemSessionProperties.getRetryPolicy;
 import static io.trino.client.NodeVersion.UNKNOWN;
+import static io.trino.collect.cache.CacheUtils.uncheckedCacheGet;
 import static io.trino.collect.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.metadata.FunctionKind.AGGREGATE;
 import static io.trino.metadata.QualifiedObjectName.convertFromSchemaTableName;
@@ -499,10 +499,10 @@ public final class MetadataManager
 
         Optional<QualifiedObjectName> objectName = prefix.asQualifiedObjectName();
         if (objectName.isPresent()) {
-            if (isExistingRelation(session, objectName.get())) {
-                return ImmutableList.of(objectName.get());
+            Optional<Boolean> exists = isExistingRelationForListing(session, objectName.get());
+            if (exists.isPresent()) {
+                return exists.get() ? ImmutableList.of(objectName.get()) : ImmutableList.of();
             }
-            return ImmutableList.of();
         }
 
         Optional<CatalogMetadata> catalog = getOptionalCatalogMetadata(session, prefix.getCatalogName());
@@ -522,20 +522,27 @@ public final class MetadataManager
         return ImmutableList.copyOf(tables);
     }
 
-    private boolean isExistingRelation(Session session, QualifiedObjectName name)
+    private Optional<Boolean> isExistingRelationForListing(Session session, QualifiedObjectName name)
     {
         if (isMaterializedView(session, name)) {
-            return true;
+            return Optional.of(true);
         }
         if (isView(session, name)) {
-            return true;
+            return Optional.of(true);
         }
 
-        // If the table is not redirected, table handle existence is checked.
-        // If the table is redirected, the target table handle is retrieved. If it does not exist, an
-        // exception is thrown. This behavior is currently inconsistent with the unfiltered case of table listing.
-        // TODO: the behavior may change with a different way to resolve relation names. https://github.com/trinodb/trino/issues/9400
-        return getRedirectionAwareTableHandle(session, name).getTableHandle().isPresent();
+        // TODO: consider a better way to resolve relation names: https://github.com/trinodb/trino/issues/9400
+        try {
+            return Optional.of(getRedirectionAwareTableHandle(session, name).getTableHandle().isPresent());
+        }
+        catch (TrinoException e) {
+            // ignore redirection errors for consistency with listing
+            if (e.getErrorCode().equals(TABLE_REDIRECTION_ERROR.toErrorCode())) {
+                return Optional.of(true);
+            }
+            // we don't know if it exists or not
+            return Optional.empty();
+        }
     }
 
     @Override
@@ -2027,13 +2034,10 @@ public final class MetadataManager
     {
         try {
             // todo we should not be caching functions across session
-            return operatorCache.get(new OperatorCacheKey(operatorType, argumentTypes), () -> {
+            return uncheckedCacheGet(operatorCache, new OperatorCacheKey(operatorType, argumentTypes), () -> {
                 String name = mangleOperatorName(operatorType);
                 return resolvedFunctionInternal(session, QualifiedName.of(name), fromTypes(argumentTypes));
             });
-        }
-        catch (ExecutionException e) {
-            throw new UncheckedExecutionException(e);
         }
         catch (UncheckedExecutionException e) {
             if (e.getCause() instanceof TrinoException) {
@@ -2059,7 +2063,7 @@ public final class MetadataManager
         checkArgument(operatorType == OperatorType.CAST || operatorType == OperatorType.SATURATED_FLOOR_CAST);
         try {
             // todo we should not be caching functions across session
-            return coercionCache.get(new CoercionCacheKey(operatorType, fromType, toType), () -> {
+            return uncheckedCacheGet(coercionCache, new CoercionCacheKey(operatorType, fromType, toType), () -> {
                 String name = mangleOperatorName(operatorType);
                 FunctionBinding functionBinding = functionResolver.resolveCoercion(
                         session,
@@ -2067,9 +2071,6 @@ public final class MetadataManager
                         new Signature(name, toType.getTypeSignature(), ImmutableList.of(fromType.getTypeSignature())));
                 return resolve(session, functionBinding);
             });
-        }
-        catch (ExecutionException e) {
-            throw new UncheckedExecutionException(e);
         }
         catch (UncheckedExecutionException e) {
             if (e.getCause() instanceof TrinoException) {
