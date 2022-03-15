@@ -69,7 +69,6 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import io.airlift.concurrent.MoreFutures;
-import io.airlift.configuration.validation.FileExists;
 import io.airlift.log.Logger;
 import io.trino.plugin.hive.HdfsEnvironment;
 import io.trino.plugin.hive.HdfsEnvironment.HdfsContext;
@@ -260,7 +259,7 @@ public class GlueHiveMetastore
         return provider;
     }
 
-    private static AWSCredentialsProvider getCustomAWSCredentialsProvider(String providerClass, Optional<@FileExists File> awsCredentialsProviderConf)
+    private static AWSCredentialsProvider getCustomAWSCredentialsProvider(String providerClass, Optional<File> awsCredentialsProviderConf)
     {
         try {
             Object instance;

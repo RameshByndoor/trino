@@ -13,8 +13,6 @@
  */
 package io.trino.plugin.hive;
 
-import com.amazonaws.auth.AWSCredentials;
-import com.amazonaws.auth.AWSCredentialsProvider;
 import com.google.common.collect.ImmutableMap;
 import com.qubole.rubix.core.CachingFileSystem;
 import io.trino.spi.Plugin;
@@ -149,29 +147,10 @@ public class TestHivePlugin
                         ImmutableMap.of(
                                 "hive.metastore", "glue",
                                 "hive.metastore.glue.region", "us-east-2",
-                                "hive.metastore.glue.aws-credentials-provider", TestCustomAwsProvider.class.getName(),
+                                "hive.metastore.glue.aws-credentials-provider", "io.trino.plugin.hive.metastore.glue.TestCustomAwsProvider",
                                 "hive.metastore.glue.aws-credentials-providerconf", customCredConf.toString()),
                         new TestingConnectorContext())
                 .shutdown();
-    }
-
-    public static class TestCustomAwsProvider
-            implements AWSCredentialsProvider
-    {
-        public TestCustomAwsProvider(File configFile)
-        {
-        }
-
-        @Override
-        public AWSCredentials getCredentials()
-        {
-            return null;
-        }
-
-        @Override
-        public void refresh()
-        {
-        }
     }
 
     @Test
